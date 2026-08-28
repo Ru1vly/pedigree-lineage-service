@@ -1,0 +1,112 @@
+{{- if and .Values.worker.enabled .Values.worker.useArgoRollout }}
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: {{ include "pedigree-lineage.fullname" . }}-worker
+  labels:
+    {{- include "pedigree-lineage.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  {{- if not .Values.keda.enabled }}
+  replicas: {{ .Values.worker.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "pedigree-lineage.workerSelectorLabels" . | nindent 6 }}
+  strategy:
+    canary:
+      steps:
+        {{- toYaml .Values.argoRollouts.canary.steps | nindent 8 }}
+      analysis:
+        templates:
+          - templateName: {{ include "pedigree-lineage.fullname" . }}-worker-canary-analysis
+        args:
+          - name: service-name
+            value: {{ include "pedigree-lineage.fullname" . }}-worker
+  template:
+    metadata:
+      labels:
+        {{- include "pedigree-lineage.workerSelectorLabels" . | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/actuator/prometheus"
+        prometheus.io/port: "8080"
+        {{- if .Values.mesh.enabled }}
+        sidecar.istio.io/inject: "true"
+        security.istio.io/tlsMode: {{ .Values.mesh.mtls.mode | quote }}
+        {{- if .Values.mesh.spiffe.enabled }}
+        spiffe.io/spiffe-id: "{{ .Values.mesh.spiffe.trustDomain }}/ns/{{ .Release.Namespace }}/sa/{{ include "pedigree-lineage.serviceAccountName" . }}"
+        {{- end }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "pedigree-lineage.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds | default 90 }}
+      containers:
+        - name: worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.worker.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "pedigree-lineage.fullname" . }}-config
+            - secretRef:
+                name: {{ include "pedigree-lineage.secretNameOrExisting" (list .Values.postgresql.existingSecret .Values.postgresql.secretName) }}
+            - secretRef:
+                name: {{ include "pedigree-lineage.secretNameOrExisting" (list .Values.kafka.existingSecret .Values.kafka.secretName) }}
+            - secretRef:
+                name: {{ include "pedigree-lineage.secretNameOrExisting" (list .Values.redis.existingSecret .Values.redis.secretName) }}
+            - secretRef:
+                name: {{ include "pedigree-lineage.secretNameOrExisting" (list .Values.security.existingAppSecret .Values.security.appSecretsName) }}
+            {{- if .Values.security.vault.enabled }}
+            - secretRef:
+                name: {{ include "pedigree-lineage.secretNameOrExisting" (list .Values.security.vault.existingSecret .Values.security.vault.secretName) }}
+            {{- end }}
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "production"
+            - name: SPRING_KAFKA_LISTENER_CONCURRENCY
+              value: {{ .Values.worker.env.springKafkaListenerConcurrency | quote }}
+            - name: SPRING_KAFKA_CONSUMER_MAX_POLL_RECORDS
+              value: {{ .Values.worker.env.springKafkaMaxPollRecords | quote }}
+            - name: SPRING_LIFECYCLE_TIMEOUT_PER_SHUTDOWN_PHASE
+              value: {{ .Values.worker.env.springLifecycleTimeoutPerShutdownPhase | quote }}
+            {{- if .Values.mesh.spiffe.enabled }}
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix://{{ .Values.mesh.spiffe.workloadApiSocket }}"
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          {{- if .Values.mesh.spiffe.enabled }}
+          volumeMounts:
+            - name: spire-agent-socket
+              mountPath: /spire-agent-sockets
+              readOnly: true
+          {{- end }}
+      {{- if .Values.mesh.spiffe.enabled }}
+      volumes:
+        - name: spire-agent-socket
+          hostPath:
+            path: /run/spire/sockets
+            type: DirectoryOrCreate
+      {{- end }}
+{{- end }}

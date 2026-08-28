@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "pedigree-lineage.fullname" . }}-config
+  labels:
+    {{- include "pedigree-lineage.labels" . | nindent 4 }}
+data:
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: {{ .Values.kafka.bootstrapServers | quote }}
+  SPRING_KAFKA_CONSUMER_GROUP_ID: {{ .Values.kafka.consumerGroup | quote }}
+  SPRING_DATASOURCE_URL: "jdbc:postgresql://{{ .Values.postgresql.host }}:{{ .Values.postgresql.port }}/{{ .Values.postgresql.database }}"
+  SPRING_REDIS_HOST: {{ .Values.redis.host | quote }}
+  SPRING_REDIS_PORT: {{ .Values.redis.port | quote }}
+  SPRING_SECURITY_OAUTH2_ISSUER_URI: {{ .Values.security.oauth2.issuerUri | quote }}
+  APP_PIPELINE_PHASE_DELAY_MS: {{ .Values.worker.env.phaseDelayMs | quote }}
+  # Vault connection details (non-secret). The token itself comes from the Secret referenced
+  # by security.vault.secretName / existingSecret - without these, the app previously fell
+  # back to application.yml's localhost:8200 default, which doesn't exist inside a pod.
+  SPRING_CLOUD_VAULT_ENABLED: {{ .Values.security.vault.enabled | quote }}
+  SPRING_CLOUD_VAULT_HOST: {{ .Values.security.vault.host | quote }}
+  SPRING_CLOUD_VAULT_PORT: {{ .Values.security.vault.port | quote }}
+  SPRING_CLOUD_VAULT_SCHEME: {{ .Values.security.vault.scheme | quote }}
+  VAULT_TRANSIT_ENABLED: {{ .Values.security.vault.enabled | quote }}

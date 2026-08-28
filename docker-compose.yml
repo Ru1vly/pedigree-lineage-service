@@ -1,0 +1,146 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lineage-app
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/lineagedb
+      - SPRING_DATASOURCE_USERNAME=lineageuser
+      - SPRING_DATASOURCE_PASSWORD=lineagepass
+      - SPRING_KAFKA_BOOTSTRAP_SERVERS=kafka:19092
+      - SPRING_REDIS_HOST=redis
+      - MANAGEMENT_ZIPKIN_TRACING_ENDPOINT=http://zipkin:9411/api/v2/spans
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: lineage-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=lineagedb
+      - POSTGRES_USER=lineageuser
+      - POSTGRES_PASSWORD=lineagepass
+    # Debezium's pgoutput plugin reads the WAL directly, which vanilla Postgres doesn't stream by
+    # default - wal_level=logical turns that on. lineageuser is used as the connector's replication
+    # role too (see debezium/lineage-outbox-connector.json): the default Postgres image entrypoint
+    # grants POSTGRES_USER superuser, which already includes REPLICATION.
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_wal_senders=10", "-c", "max_replication_slots=10"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lineageuser -d lineagedb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: lineage-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # Single-node KRaft (no Zookeeper): the PLAINTEXT listener is for other containers on this
+      # compose network (app, connect); PLAINTEXT_HOST is for host-side access, e.g. a local kafka
+      # CLI against localhost:9092.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_LISTENERS: CONTROLLER://:29093,PLAINTEXT_HOST://:9092,PLAINTEXT://:19092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT_HOST://localhost:9092,PLAINTEXT://kafka:19092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      CLUSTER_ID: pedigree-lineage-kafka-cluster
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  connect:
+    image: quay.io/debezium/connect:3.6.0.Final
+    container_name: lineage-debezium-connect
+    ports:
+      - "8083:8083"
+    environment:
+      - BOOTSTRAP_SERVERS=kafka:19092
+      - GROUP_ID=pedigree-lineage-connect
+      - CONFIG_STORAGE_TOPIC=pedigree_connect_configs
+      - OFFSET_STORAGE_TOPIC=pedigree_connect_offsets
+      - STATUS_STORAGE_TOPIC=pedigree_connect_status
+      # Single Kafka broker in this compose file - the image's own defaults assume a 3-broker
+      # cluster and would otherwise fail to create these internal topics.
+      - CONFIG_STORAGE_REPLICATION_FACTOR=1
+      - OFFSET_STORAGE_REPLICATION_FACTOR=1
+      - STATUS_STORAGE_REPLICATION_FACTOR=1
+      # The full image bundles ~20 connector plugins, all scanned at worker startup regardless of
+      # which one is actually used - slow, but plugin.path must stay at the default /kafka/connect
+      # (a directory OF plugin directories). Pointing it directly at .../debezium-connector-postgres
+      # isolates each of that connector's own jars into a separate classloader instead of bundling
+      # them together, so the connector can't see its own JDBC driver/kafka-clients and never
+      # registers.
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -f http://localhost:8083/connectors"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  connector-setup:
+    image: curlimages/curl:8.11.0
+    container_name: lineage-debezium-connector-setup
+    depends_on:
+      connect:
+        condition: service_healthy
+    volumes:
+      - ./debezium/lineage-outbox-connector.json:/connector.json:ro
+    entrypoint: ["/bin/sh", "-c"]
+    # Idempotent: docker-compose up recreates this container on every restart, but Kafka Connect's
+    # own state (backed by the *_connect_configs topic) survives - re-POSTing an already-registered
+    # connector returns 409, so check first instead of failing the whole compose run on restart.
+    command:
+      - |
+        set -e
+        STATUS=$$(curl -s -o /dev/null -w '%{http_code}' http://connect:8083/connectors/lineage-outbox-connector)
+        if [ "$$STATUS" = "200" ]; then
+          echo "lineage-outbox-connector already registered, skipping."
+        else
+          curl -s -f -X POST -H "Content-Type: application/json" --data @/connector.json http://connect:8083/connectors
+          echo "lineage-outbox-connector registered."
+        fi
+    restart: "no"
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: lineage-redis
+    ports:
+      - "6379:6379"
+
+  zipkin:
+    image: openzipkin/zipkin:3
+    container_name: lineage-zipkin
+    ports:
+      - "9411:9411"
+
+volumes:
+  postgres_data:

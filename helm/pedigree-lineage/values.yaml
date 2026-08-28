@@ -1,0 +1,275 @@
+# Default values for pedigree-lineage chart
+
+global:
+  environment: production
+  domain: edevlet.gov.tr
+
+# Common metadata & tags
+image:
+  repository: registry.edevlet.gov.tr/pedigree/lineage-service
+  pullPolicy: IfNotPresent
+  tag: "1.0.0"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: "pedigree-lineage-sa"
+
+# Spring Boot Ingress API workload
+api:
+  enabled: true
+  replicaCount: 3
+  port: 8080
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1024Mi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  service:
+    type: ClusterIP
+    port: 8080
+  ingress:
+    enabled: true
+    className: "nginx"
+    annotations:
+      kubernetes.io/ingress.class: nginx
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    hosts:
+      - host: lineage.edevlet.gov.tr
+        paths:
+          - path: /api/v1
+            pathType: Prefix
+          - path: /actuator
+            pathType: Prefix
+    tls:
+      - secretName: pedigree-lineage-tls
+        hosts:
+          - lineage.edevlet.gov.tr
+
+# Asynchronous Worker workload (Kafka consumer of the Debezium-routed outbox topic)
+worker:
+  enabled: true
+  replicaCount: 2 # Initial / minimum baseline replicas
+  port: 8080
+  terminationGracePeriodSeconds: 90
+  useArgoRollout: false # Toggle between standard Deployment and Argo Rollout
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 2048Mi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+  env:
+    # Kafka listener concurrency is the per-pod partition parallelism. Total in-flight consumers
+    # across the deployment is replicas x concurrency, and Kafka assigns at most one consumer per
+    # partition, so anything above kafka.topicPartitions in total sits idle - see keda.maxReplicaCount.
+    springKafkaListenerConcurrency: "3"
+    springKafkaMaxPollRecords: "20"
+    springLifecycleTimeoutPerShutdownPhase: "60s"
+    phaseDelayMs: "1500"
+
+# KEDA (Kubernetes Event-driven Autoscaling) Configuration
+# Scales worker pods on Kafka consumer-group lag for the Debezium-routed outbox topic, which is
+# the queue signal this service actually has: the ingress path is Kafka + Debezium CDC end to end
+# and there is no RabbitMQ in the stack (no AMQP broker in docker-compose.yml, no
+# spring-boot-starter-amqp in pom.xml). This previously pointed at a rabbitmq trigger reading
+# lineage.query.ingress.queue, a queue on a broker that no longer exists - so the trigger could
+# never report depth and the worker tier would never scale out under load.
+keda:
+  enabled: true
+  scaledObjectName: pedigree-lineage-worker-scaler
+  minReplicaCount: 2
+  # One consumer per partition is the hard ceiling on useful workers; past kafka.topicPartitions
+  # extra pods idle. Raise the topic's partition count first if more parallelism is needed.
+  maxReplicaCount: 12
+  pollingInterval: 5      # Check consumer lag every 5 seconds for fast burst response
+  cooldownPeriod: 300     # Wait 5 minutes after lag clears before scaling down
+  triggerType: kafka
+  topic: lineage.query.events
+  consumerGroup: lineage-worker-group
+  # Target lag per pod: 50,000 backlogged events / 1,000 per pod saturates the partition ceiling.
+  lagThreshold: 1000
+  activationLagThreshold: 1
+  # Scale to zero is off: minReplicaCount is 2, and offsetResetPolicy governs how KEDA reads lag
+  # for a group with no committed offset yet.
+  offsetResetPolicy: earliest
+  # excludePersistentLag avoids holding the tier scaled out on a partition whose lag never drains
+  # (e.g. a poison record parked ahead of the committed offset).
+  excludePersistentLag: "true"
+  # SASL/TLS trigger auth. Off by default for in-cluster PLAINTEXT listeners; when enabled, the
+  # keys below are read from the kafka secret by keda-triggerauth.yaml.
+  auth:
+    enabled: false
+    saslSecretKey: sasl
+    usernameSecretKey: username
+    passwordSecretKey: password
+    tlsSecretKey: tls
+
+  # Advanced HPA Behavior tuning for sudden 50k spikes
+  hpaBehavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0 # Instant scale up on burst (no delay)
+      selectPolicy: Max
+      policies:
+        - type: Pods
+          value: 48        # Can add up to +48 pods in a single 15-second evaluation interval
+          periodSeconds: 15
+        - type: Percent
+          value: 1000      # 10x scale up speed
+          periodSeconds: 15
+    scaleDown:
+      stabilizationWindowSeconds: 300 # 5 min stabilization window to finish active jobs
+      selectPolicy: Min
+      policies:
+        - type: Percent
+          value: 10        # Gradual scale down of 10% per minute to avoid job drops
+          periodSeconds: 60
+
+# Pod Disruption Budget for High Availability during cluster maintenance
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+# ArgoCD & Argo Rollouts Zero-Downtime Canary Strategy
+argoRollouts:
+  enabled: false # Set to true when deploying via Argo Rollouts controller
+  canary:
+    steps:
+      - setWeight: 10
+      - pause: { duration: 2m }
+      - analysis:
+          templates:
+            - templateName: pedigree-worker-canary-analysis
+      - setWeight: 30
+      - pause: { duration: 3m }
+      - setWeight: 60
+      - pause: { duration: 2m }
+      - setWeight: 100
+  analysis:
+    enabled: true
+    interval: 30s
+    successCondition: "result[0] < 0.005" # Less than 0.5% HTTP error rate
+    failureLimit: 3
+    prometheusAddress: "http://prometheus-k8s.monitoring.svc.cluster.local:9090"
+
+# Flux CD v2 & Flagger Progressive Delivery Configuration
+flux:
+  enabled: false # Set to true when deploying via Flux CD v2 & Flagger
+  flagger:
+    enabled: false
+    progressDeadlineSeconds: 600
+    targetRef:
+      apiVersion: apps/v1
+      kind: Deployment
+      name: pedigree-lineage-worker
+    analysis:
+      interval: 30s
+      threshold: 5
+      maxWeight: 50
+      stepWeight: 10
+      metrics:
+        - name: request-success-rate
+          thresholdRange:
+            min: 99.5
+          interval: 1m
+        - name: request-duration
+          thresholdRange:
+            max: 500
+          interval: 1m
+
+# Infrastructure Credentials & Endpoints
+#
+# Every password/secret value below is a deliberately obvious placeholder so `helm template`
+# and a first-time `helm install` still work out of the box. None of them are safe to run with
+# as-is: either override them per-environment (values-prod.yaml, --set-string, or a values file
+# kept out of version control) or, preferably, set the matching `existingSecret` field to the
+# name of a Secret your platform already manages (Vault Agent Injector, ExternalSecrets,
+# Sealed Secrets, ...) and this chart will reference it instead of templating its own.
+kafka:
+  bootstrapServers: kafka.infrastructure.svc.cluster.local:9092
+  # Topic Debezium routes the transactional outbox onto, and its dead-letter topic. These must
+  # match KafkaConfig.TOPIC_LINEAGE_QUERY_EVENTS / TOPIC_LINEAGE_QUERY_EVENTS_DLT.
+  topic: lineage.query.events
+  dltTopic: lineage.query.events.dlt
+  consumerGroup: lineage-worker-group
+  dltConsumerGroup: lineage-worker-dlt-group
+  # Caps useful worker parallelism - Kafka gives each partition to at most one consumer in a
+  # group, so keda.maxReplicaCount should not exceed this.
+  topicPartitions: 12
+  username: lineage_app
+  password: "changeme-kafka-password-set-per-environment"
+  # SASL mechanism used when keda.auth.enabled / client SASL is turned on (e.g. scram_sha512).
+  saslMechanism: "plaintext"
+  tls: "disable"
+  secretName: pedigree-lineage-kafka-secret
+  existingSecret: ""   # e.g. "vault-injected-kafka-creds" - if set, password/username above are ignored
+
+postgresql:
+  host: postgres-primary.infrastructure.svc.cluster.local
+  port: 5432
+  database: lineagedb
+  username: lineageuser
+  password: "changeme-postgresql-password-set-per-environment"
+  secretName: pedigree-lineage-db-secret
+  existingSecret: ""   # e.g. "vault-injected-db-creds" - if set, password/username above are ignored
+
+redis:
+  host: redis-master.infrastructure.svc.cluster.local
+  port: 6379
+  secretName: pedigree-lineage-redis-secret
+  existingSecret: ""
+
+security:
+  oauth2:
+    issuerUri: http://keycloak.identity.svc.cluster.local:8080/realms/e-devlet
+  jwt:
+    # HS256 secret the API uses to validate inbound JWTs (see SecurityConfig /
+    # SecretsConfigurationGuard). The app refuses to start under the "production" Spring
+    # profile if this is left at its application.yml default - see values-prod.yaml.
+    secret: "changeme-generate-a-real-256-bit-secret-per-environment"
+  encryption:
+    # Fallback AES-256-GCM key used only when Vault Transit is disabled/unreachable.
+    masterKey: "changeme-generate-a-real-256-bit-key-per-environment"
+  # Secret holding JWT_HMAC_SECRET + TCKN_ENCRYPTION_MASTER_KEY (the two values above).
+  # Also refused to start under the "production" profile if left unchanged.
+  appSecretsName: pedigree-lineage-app-secret
+  existingAppSecret: ""   # if set, must be a pre-existing Secret with those two keys
+  vault:
+    enabled: true
+    addr: "http://vault.infrastructure.svc.cluster.local:8200"
+    host: vault.infrastructure.svc.cluster.local
+    port: 8200
+    scheme: http
+    token: "root"   # Vault dev-server convention; a real Vault deploys with AppRole/K8s auth, not a static token
+    role: "pedigree-lineage-role"
+    databaseRole: "pedigree-db-role"
+    secretName: pedigree-lineage-vault-token-secret
+    existingSecret: ""
+
+# Service Mesh (Istio / Linkerd) & SPIFFE/SPIRE Pod-to-Pod mTLS Encryption
+mesh:
+  enabled: true
+  type: istio # istio or linkerd
+  mtls:
+    mode: STRICT
+  spiffe:
+    enabled: true
+    trustDomain: "spiffe://cluster.local"
+    workloadApiSocket: "/spire-agent-sockets/spire-agent.sock"
+

@@ -1,0 +1,37 @@
+apiVersion: flagger.app/v1beta1
+kind: Canary
+metadata:
+  name: pedigree-lineage-worker
+  namespace: pedigree-lineage
+spec:
+  provider: nginx # or istio/smi
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: pedigree-lineage-worker
+  progressDeadlineSeconds: 600
+  service:
+    port: 8080
+    targetPort: 8080
+  analysis:
+    interval: 30s
+    threshold: 5
+    maxWeight: 50
+    stepWeight: 10
+    metrics:
+      - name: request-success-rate
+        thresholdRange:
+          min: 99.5
+        interval: 1m
+      - name: request-duration
+        thresholdRange:
+          max: 500
+        interval: 1m
+    webhooks:
+      - name: load-test
+        type: rollout
+        url: http://flagger-loadtester.monitoring/
+        timeout: 5s
+        metadata:
+          type: cmd
+          cmd: "hey -z 1m -c 10 http://pedigree-lineage-worker-canary.pedigree-lineage:8080/actuator/health"

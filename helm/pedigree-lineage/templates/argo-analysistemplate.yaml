@@ -1,0 +1,37 @@
+{{- if .Values.argoRollouts.analysis.enabled }}
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: {{ include "pedigree-lineage.fullname" . }}-worker-canary-analysis
+  labels:
+    {{- include "pedigree-lineage.labels" . | nindent 4 }}
+spec:
+  args:
+    - name: service-name
+  metrics:
+    - name: success-rate
+      interval: {{ .Values.argoRollouts.analysis.interval }}
+      successCondition: {{ .Values.argoRollouts.analysis.successCondition | quote }}
+      failureLimit: {{ .Values.argoRollouts.analysis.failureLimit }}
+      provider:
+        prometheus:
+          address: {{ .Values.argoRollouts.analysis.prometheusAddress | quote }}
+          query: |
+            sum(rate(http_server_requests_seconds_count{status=~"5..", app="{{ include "pedigree-lineage.fullname" . }}-worker"}[2m]))
+            /
+            sum(rate(http_server_requests_seconds_count{app="{{ include "pedigree-lineage.fullname" . }}-worker"}[2m]))
+    # Any arrival on the Kafka dead-letter topic during a canary step fails the rollout. This
+    # replaces a rabbitmq_queue_messages_published_total probe against lineage.query.dlq.queue -
+    # a queue on a broker this stack no longer runs, so the metric was always absent and the
+    # check could never fail no matter how badly the canary was dead-lettering. The series below
+    # comes from the app's own DLT consumer via Micrometer's Kafka client metrics.
+    - name: kafka-dlt-arrival-rate
+      interval: 1m
+      successCondition: "result[0] == 0"
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: {{ .Values.argoRollouts.analysis.prometheusAddress | quote }}
+          query: |
+            sum(increase(kafka_consumer_fetch_manager_records_consumed_total{topic="{{ .Values.kafka.dltTopic }}"}[2m]))
+{{- end }}

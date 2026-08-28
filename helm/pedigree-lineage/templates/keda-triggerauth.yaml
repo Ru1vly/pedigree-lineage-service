@@ -1,0 +1,25 @@
+{{- if and .Values.worker.enabled .Values.keda.enabled .Values.keda.auth.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ include "pedigree-lineage.fullname" . }}-keda-kafka-auth
+  labels:
+    {{- include "pedigree-lineage.labels" . | nindent 4 }}
+spec:
+  # Credentials KEDA's kafka scaler uses to read consumer-group lag. Only rendered when
+  # keda.auth.enabled is set: an in-cluster PLAINTEXT listener needs no TriggerAuthentication,
+  # and an empty one would make the scaler fail rather than fall through to anonymous access.
+  secretTargetRef:
+    - parameter: sasl
+      name: {{ include "pedigree-lineage.secretNameOrExisting" (list .Values.kafka.existingSecret .Values.kafka.secretName) }}
+      key: {{ .Values.keda.auth.saslSecretKey }}
+    - parameter: username
+      name: {{ include "pedigree-lineage.secretNameOrExisting" (list .Values.kafka.existingSecret .Values.kafka.secretName) }}
+      key: {{ .Values.keda.auth.usernameSecretKey }}
+    - parameter: password
+      name: {{ include "pedigree-lineage.secretNameOrExisting" (list .Values.kafka.existingSecret .Values.kafka.secretName) }}
+      key: {{ .Values.keda.auth.passwordSecretKey }}
+    - parameter: tls
+      name: {{ include "pedigree-lineage.secretNameOrExisting" (list .Values.kafka.existingSecret .Values.kafka.secretName) }}
+      key: {{ .Values.keda.auth.tlsSecretKey }}
+{{- end }}

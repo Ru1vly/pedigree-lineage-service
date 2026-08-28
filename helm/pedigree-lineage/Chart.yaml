@@ -1,0 +1,19 @@
+apiVersion: v2
+name: pedigree-lineage
+description: Production-grade Helm chart for Pedigree Lineage Service with KEDA Kafka consumer-lag autoscaling & zero-downtime canary deployment manifests
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - java21
+  - springboot3
+  - keda
+  - kafka
+  - autoscaling
+  - argo-rollouts
+  - fluxcd
+  - flagger
+  - zero-downtime
+maintainers:
+  - name: enterprise-architecture-team
+    email: devops@edevlet.gov.tr

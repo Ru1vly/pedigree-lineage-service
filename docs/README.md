@@ -1,0 +1,30 @@
+# Documentation
+
+Start with whichever matches what you're doing. They don't need to be read in order.
+
+**[CODE_MAP.md](CODE_MAP.md)** — where things live, the lifecycle of one lineage query from
+HTTP POST to dead-letter topic, the transaction boundaries, the threading model, and the
+invariants you're not allowed to break. Read this before changing anything in
+`infrastructure/pipeline` or `infrastructure/security`.
+
+**[CONFIGURATION.md](CONFIGURATION.md)** — every property and environment variable that matters,
+its default, and what breaks when it's wrong. Includes what the production startup guard
+enforces and which property in `application.yml` is dead weight that has never done anything.
+
+**[OPERATIONS.md](OPERATIONS.md)** — local bring-up, deployment, how autoscaling behaves and why
+the replica ceiling is what it is, and a failure-mode list: what a given symptom actually means
+and where to look.
+
+**[TESTING.md](TESTING.md)** — what each test class proves, which ones structurally cannot
+detect transaction bugs, and the setup traps (Redis bean-name collisions, `-parameters`, slice
+dependencies) that will otherwise cost you an afternoon.
+
+**[WHAT_WAS_BROKEN.md](WHAT_WAS_BROKEN.md)** — the seven defects fixed in the security,
+transaction and autoscaling rework. Root cause for each, why the obvious fix was wrong for two
+of them, and what remains unverified. Read before reverting any of it.
+
+**[SECURITY_ARCHITECTURE_NOTES.md](SECURITY_ARCHITECTURE_NOTES.md)** — field-level TCKN
+encryption, Vault dynamic secrets, SPIFFE/SPIRE mTLS.
+
+**[ARCHITECTURE_AND_CANARY_DEPLOYMENTS.md](ARCHITECTURE_AND_CANARY_DEPLOYMENTS.md)** — KEDA
+consumer-lag autoscaling and progressive delivery in depth.

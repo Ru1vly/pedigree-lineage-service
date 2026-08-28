@@ -1,0 +1,43 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: pedigree-worker-canary-analysis
+  namespace: pedigree-lineage
+spec:
+  args:
+    - name: service-name
+  metrics:
+    - name: success-rate
+      interval: 30s
+      successCondition: "result[0] < 0.005" # HTTP error rate < 0.5%
+      failureLimit: 3
+      provider:
+        prometheus:
+          address: "http://prometheus-k8s.monitoring.svc.cluster.local:9090"
+          query: |
+            sum(rate(http_server_requests_seconds_count{status=~"5..", app="pedigree-lineage-worker"}[2m]))
+            /
+            sum(rate(http_server_requests_seconds_count{app="pedigree-lineage-worker"}[2m]))
+    # Zero arrivals on the Kafka dead-letter topic during the canary. Replaces a RabbitMQ DLQ
+    # probe that could never fire: the ingress path is Kafka + Debezium and no AMQP broker runs
+    # in this stack, so the old series was permanently absent and the gate permanently green.
+    - name: kafka-dlt-arrival-rate
+      interval: 1m
+      successCondition: "result[0] == 0"
+      failureLimit: 2
+      provider:
+        prometheus:
+          address: "http://prometheus-k8s.monitoring.svc.cluster.local:9090"
+          query: |
+            sum(increase(kafka_consumer_fetch_manager_records_consumed_total{topic="lineage.query.events.dlt"}[2m]))
+    - name: worker-cpu-saturation
+      interval: 1m
+      successCondition: "result[0] < 0.90" # CPU usage under 90%
+      failureLimit: 3
+      provider:
+        prometheus:
+          address: "http://prometheus-k8s.monitoring.svc.cluster.local:9090"
+          query: |
+            sum(rate(container_cpu_usage_seconds_total{container="worker", pod=~"pedigree-lineage-worker-.*"}[2m]))
+            /
+            sum(kube_pod_container_resource_limits{container="worker", resource="cpu", pod=~"pedigree-lineage-worker-.*"})

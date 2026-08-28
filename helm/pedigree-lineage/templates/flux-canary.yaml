@@ -1,0 +1,24 @@
+{{- if and .Values.flux.enabled .Values.flux.flagger.enabled }}
+apiVersion: flagger.app/v1beta1
+kind: Canary
+metadata:
+  name: {{ include "pedigree-lineage.fullname" . }}-worker
+  labels:
+    {{- include "pedigree-lineage.labels" . | nindent 4 }}
+spec:
+  targetRef:
+    apiVersion: {{ .Values.flux.flagger.targetRef.apiVersion }}
+    kind: {{ .Values.flux.flagger.targetRef.kind }}
+    name: {{ include "pedigree-lineage.fullname" . }}-worker
+  progressDeadlineSeconds: {{ .Values.flux.flagger.progressDeadlineSeconds }}
+  service:
+    port: 8080
+    targetPort: 8080
+  analysis:
+    interval: {{ .Values.flux.flagger.analysis.interval }}
+    threshold: {{ .Values.flux.flagger.analysis.threshold }}
+    maxWeight: {{ .Values.flux.flagger.analysis.maxWeight }}
+    stepWeight: {{ .Values.flux.flagger.analysis.stepWeight }}
+    metrics:
+      {{- toYaml .Values.flux.flagger.analysis.metrics | nindent 6 }}
+{{- end }}

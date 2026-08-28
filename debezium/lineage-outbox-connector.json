@@ -1,0 +1,28 @@
+{
+  "name": "lineage-outbox-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "lineageuser",
+    "database.password": "lineagepass",
+    "database.dbname": "lineagedb",
+    "topic.prefix": "pedigree",
+    "slot.name": "debezium_outbox_slot",
+    "publication.autocreate.mode": "filtered",
+    "plugin.name": "pgoutput",
+    "table.include.list": "public.transactional_outbox",
+    "tombstones.on.delete": "false",
+
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+    "value.converter": "org.apache.kafka.connect.storage.StringConverter",
+
+    "transforms": "outbox",
+    "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+    "transforms.outbox.route.by.field": "aggregate_type",
+    "transforms.outbox.table.field.event.key": "aggregate_id",
+    "transforms.outbox.table.fields.additional.placement": "event_type:header:eventType",
+    "transforms.outbox.route.topic.replacement": "lineage.query.events"
+  }
+}

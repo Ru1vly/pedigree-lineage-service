@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>e-Devlet Pedigree Lineage Query Service</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #0f172a;
+            --card-bg: rgba(30, 41, 59, 0.7);
+            --border-color: rgba(255, 255, 255, 0.1);
+            --primary-red: #e11d48;
+            --primary-red-glow: rgba(225, 29, 72, 0.4);
+            --accent-blue: #38bdf8;
+            --accent-green: #22c55e;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background: radial-gradient(circle at top left, #1e1b4b, var(--bg-dark));
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        header {
+            width: 100%;
+            max-width: 1100px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 2rem;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 2rem;
+        }
+
+        .logo-box {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .logo-emblem {
+            width: 48px;
+            height: 48px;
+            background: linear-gradient(135deg, var(--primary-red), #9f1239);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 1.4rem;
+            box-shadow: 0 0 20px var(--primary-red-glow);
+        }
+
+        .logo-text h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            letter-spacing: -0.5px;
+        }
+
+        .logo-text p {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        .badge-live {
+            background: rgba(34, 197, 94, 0.15);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+            color: var(--accent-green);
+            padding: 0.4rem 0.8rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .badge-live::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            background: var(--accent-green);
+            border-radius: 50%;
+            box-shadow: 0 0 8px var(--accent-green);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 0.4; }
+            50% { opacity: 1; }
+            100% { opacity: 0.4; }
+        }
+
+        main {
+            width: 100%;
+            max-width: 1100px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 2rem;
+        }
+
+        @media (max-width: 900px) {
+            main { grid-template-columns: 1fr; }
+        }
+
+        .card {
+            background: var(--card-bg);
+            backdrop-filter: blur(16px);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 1.8rem;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+        }
+
+        .card h2 {
+            font-size: 1.2rem;
+            font-weight: 600;
+            margin-bottom: 1.2rem;
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+        }
+
+        .form-group {
+            margin-bottom: 1.2rem;
+        }
+
+        label {
+            display: block;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.4rem;
+            font-weight: 500;
+        }
+
+        input, select {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 0.95rem;
+            transition: all 0.2s;
+        }
+
+        input:focus, select:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+            box-shadow: 0 0 10px rgba(56, 189, 248, 0.2);
+        }
+
+        .btn {
+            width: 100%;
+            padding: 0.85rem;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary-red), #be123c);
+            color: white;
+            box-shadow: 0 4px 15px var(--primary-red-glow);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px var(--primary-red-glow);
+        }
+
+        .btn-secondary {
+            background: rgba(56, 189, 248, 0.15);
+            color: var(--accent-blue);
+            border: 1px solid rgba(56, 189, 248, 0.3);
+            margin-top: 0.5rem;
+        }
+
+        .btn-secondary:hover {
+            background: rgba(56, 189, 248, 0.25);
+        }
+
+        /* Progress Bar */
+        .progress-container {
+            margin-top: 1.5rem;
+        }
+
+        .progress-bar-bg {
+            width: 100%;
+            height: 12px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 6px;
+            overflow: hidden;
+            margin-bottom: 0.8rem;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, var(--accent-blue), var(--accent-green));
+            transition: width 0.5s ease;
+            box-shadow: 0 0 12px var(--accent-blue);
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 0.3rem 0.8rem;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-SUBMITTED { background: rgba(245, 158, 11, 0.2); color: #f59e0b; }
+        .status-PROCESSING { background: rgba(56, 189, 248, 0.2); color: var(--accent-blue); }
+        .status-COMPLETED { background: rgba(34, 197, 94, 0.2); color: var(--accent-green); }
+        .status-FAILED { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
+
+        /* JSON & Tree Display */
+        pre {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            background: rgba(15, 23, 42, 0.8);
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            max-height: 250px;
+            border: 1px solid var(--border-color);
+        }
+
+        .tree-node {
+            background: rgba(30, 41, 59, 0.9);
+            border: 1px solid rgba(56, 189, 248, 0.3);
+            border-radius: 8px;
+            padding: 0.8rem;
+            margin-bottom: 0.6rem;
+        }
+
+        .tree-node h4 {
+            font-size: 0.9rem;
+            color: var(--accent-blue);
+            margin-bottom: 0.2rem;
+        }
+
+        .tree-node p {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="logo-box">
+            <div class="logo-emblem">tc</div>
+            <div class="logo-text">
+                <h1>e-Devlet Pedigree Lineage Query Service</h1>
+                <p>Distributed Asynchronous Pedigree Processing Engine (Spring Boot 3 / Java 21)</p>
+            </div>
+        </div>
+        <div class="badge-live">OAuth2 Resource Server Active</div>
+    </header>
+
+    <main>
+        <!-- Form Section -->
+        <section class="card">
+            <h2>📝 Submit Pedigree Query Task</h2>
+            <form id="lineageForm">
+                <div class="form-group">
+                    <label for="nationalId">TCKN (Turkish National Identity Number)</label>
+                    <input type="text" id="nationalId" value="10000000000" required maxlength="11">
+                </div>
+
+                <div class="form-group">
+                    <label for="generationsDepth">Ancestry Generations Depth</label>
+                    <select id="generationsDepth">
+                        <option value="1">1 Generation (Parents)</option>
+                        <option value="2">2 Generations (Grandparents)</option>
+                        <option value="3" selected>3 Generations (Great-Grandparents)</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="idempotencyKey">Idempotency Key</label>
+                    <input type="text" id="idempotencyKey" readonly>
+                </div>
+
+                <button type="submit" class="btn btn-primary" id="btnSubmit">
+                    ⚡ Submit Async Query (HTTP 202 Accepted)
+                </button>
+            </form>
+        </section>
+
+        <!-- Status & Results Section -->
+        <section class="card">
+            <h2>🔄 Real-Time Task Progress</h2>
+            <div id="statusBox">
+                <p style="color: var(--text-secondary);">Submit a query to inspect live async processing progress.</p>
+            </div>
+
+            <div class="progress-container" id="progressContainer" style="display: none;">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 0.4rem; font-size: 0.85rem;">
+                    <span id="phaseLabel">Initiated</span>
+                    <span id="progressText">0%</span>
+                </div>
+                <div class="progress-bar-bg">
+                    <div class="progress-bar-fill" id="progressBar"></div>
+                </div>
+                <div id="statusBadgeContainer">
+                    <span class="status-badge status-SUBMITTED" id="statusBadge">SUBMITTED</span>
+                </div>
+            </div>
+
+            <div id="resultSection" style="margin-top: 1.5rem; display: none;">
+                <h3 style="font-size: 1rem; margin-bottom: 0.8rem; color: var(--accent-green);">📜 Certified Pedigree Results</h3>
+                <div id="treeContainer"></div>
+                <button class="btn btn-secondary" id="btnDownload" onclick="downloadDocument()">
+                    📥 Download Certified Official Pedigree Document
+                </button>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        let currentTransactionId = null;
+        let currentDocumentUrl = null;
+        let currentToken = null;
+
+        function generateIdempotencyKey() {
+            return 'idem-' + Math.random().toString(36).substring(2, 11) + '-' + Date.now();
+        }
+
+        document.getElementById('idempotencyKey').value = generateIdempotencyKey();
+
+        // This demo has no real OIDC login flow. Instead it asks the app's own dev-only
+        // /api/v1/lineage/dev/token endpoint (see DevTokenController) for a JWT signed with the
+        // app's own secret. That endpoint - and this whole demo - only works against a
+        // non-production instance; a real deployment always runs with SPRING_PROFILES_ACTIVE=
+        // production, which compiles the endpoint out entirely.
+        async function fetchDemoToken(nationalId) {
+            const res = await fetch('/api/v1/lineage/dev/token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ nationalId })
+            });
+            if (!res.ok) {
+                throw new Error(
+                    'Could not obtain a demo token (HTTP ' + res.status + '). This demo only works against a ' +
+                    'non-production instance - if this is a real deployment, sign in through your OIDC provider ' +
+                    'and call the API with a real access token instead.'
+                );
+            }
+            const data = await res.json();
+            return data.token;
+        }
+
+        document.getElementById('lineageForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('btnSubmit');
+            btn.disabled = true;
+            btn.innerText = 'Submitting Request...';
+
+            const nationalId = document.getElementById('nationalId').value;
+            const payload = {
+                nationalId: nationalId,
+                generationsDepth: parseInt(document.getElementById('generationsDepth').value),
+                includeCertificates: true,
+                documentFormat: 'PDF',
+                idempotencyKey: document.getElementById('idempotencyKey').value
+            };
+
+            try {
+                // Kept for the lifetime of this submission (including the eventual download) -
+                // the document endpoint checks that the caller owns the task, so polling and
+                // downloading must reuse the same identity that submitted it, not a fresh token.
+                currentToken = await fetchDemoToken(nationalId);
+                const response = await fetch('/api/v1/lineage/queries', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + currentToken
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                if (response.status === 202) {
+                    const data = await response.json();
+                    currentTransactionId = data.transactionId;
+
+                    document.getElementById('progressContainer').style.display = 'block';
+                    document.getElementById('statusBox').innerHTML = `
+                        <p style="font-size: 0.85rem; color: var(--text-secondary);">Transaction ID: <code style="color: var(--accent-blue);">${data.transactionId}</code></p>
+                    `;
+
+                    pollStatus(currentTransactionId, currentToken);
+                } else {
+                    const err = await response.json();
+                    alert('Submission failed: ' + (err.message || 'Validation error'));
+                }
+            } catch (err) {
+                alert(err.message || 'Network error submitting query');
+            } finally {
+                btn.disabled = false;
+                btn.innerText = '⚡ Submit Async Query (HTTP 202 Accepted)';
+            }
+        });
+
+        async function pollStatus(txId, token) {
+            const interval = setInterval(async () => {
+                try {
+                    const res = await fetch(`/api/v1/lineage/queries/${txId}`, {
+                        headers: { 'Authorization': 'Bearer ' + token }
+                    });
+                    if (res.ok) {
+                        const data = await res.json();
+                        updateUi(data);
+
+                        if (data.status === 'COMPLETED' || data.status === 'FAILED') {
+                            clearInterval(interval);
+                            document.getElementById('idempotencyKey').value = generateIdempotencyKey();
+                        }
+                    }
+                } catch (e) {
+                    console.error('Polling error', e);
+                }
+            }, 1000);
+        }
+
+        function updateUi(data) {
+            document.getElementById('progressBar').style.width = data.progressPercentage + '%';
+            document.getElementById('progressText').innerText = data.progressPercentage + '%';
+            document.getElementById('phaseLabel').innerText = data.phaseDescription || data.currentPhase;
+
+            const badge = document.getElementById('statusBadge');
+            badge.className = 'status-badge status-' + data.status;
+            badge.innerText = data.status;
+
+            if (data.status === 'COMPLETED' && data.result) {
+                document.getElementById('resultSection').style.display = 'block';
+                currentDocumentUrl = data.resultDownloadUrl || `/api/v1/lineage/documents/${data.transactionId}/download`;
+
+                const treeHtml = `
+                    <div class="tree-node">
+                        <h4>SELF: ${data.result.rootPerson.firstName} ${data.result.rootPerson.lastName}</h4>
+                        <p>TCKN: ${data.result.rootPerson.nationalIdMasked} | Status: ${data.result.rootPerson.status}</p>
+                    </div>
+                ` + data.result.generations.map(gen => `
+                    <div style="margin-left: 1rem; border-left: 2px dashed var(--accent-blue); padding-left: 1rem; margin-top: 0.5rem;">
+                        <span style="font-size: 0.8rem; color: var(--accent-blue); font-weight: 600;">${gen.relationLabel}</span>
+                        ${gen.members.map(m => `
+                            <div class="tree-node" style="margin-top: 0.4rem;">
+                                <h4>${m.relation}: ${m.firstName} ${m.lastName}</h4>
+                                <p>TCKN: ${m.nationalIdMasked} | Status: ${m.status} | Birth: ${m.birthDate}</p>
+                            </div>
+                        `).join('')}
+                    </div>
+                `).join('');
+
+                document.getElementById('treeContainer').innerHTML = treeHtml;
+            }
+        }
+
+        async function downloadDocument() {
+            // window.open() can't attach an Authorization header, and the document endpoint
+            // correctly requires one (it checks the caller owns the task) - so this has to be a
+            // fetch that carries the same token this session submitted the query with, with the
+            // response turned into a downloadable blob.
+            if (!currentTransactionId || !currentToken) {
+                alert('Submit and complete a query first.');
+                return;
+            }
+            const url = currentDocumentUrl || `/api/v1/lineage/documents/${currentTransactionId}/download`;
+            try {
+                const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + currentToken } });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    alert('Document download failed: ' + (err.message || ('HTTP ' + res.status)));
+                    return;
+                }
+                const blob = await res.blob();
+                const blobUrl = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = blobUrl;
+                link.download = 'soyagaci_belgesi_' + currentTransactionId.substring(0, 8) + '.txt';
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                URL.revokeObjectURL(blobUrl);
+            } catch (err) {
+                alert('Network error downloading document');
+            }
+        }
+    </script>
+</body>
+</html>

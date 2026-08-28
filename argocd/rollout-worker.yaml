@@ -1,0 +1,115 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: pedigree-lineage-worker
+  namespace: pedigree-lineage
+  labels:
+    app.kubernetes.io/name: pedigree-lineage-worker
+    app.kubernetes.io/component: worker
+spec:
+  revisionHistoryLimit: 10
+  strategy:
+    canary:
+      canaryService: pedigree-lineage-worker-canary
+      stableService: pedigree-lineage-worker-stable
+      trafficRouting:
+        nginx:
+          stableIngress: pedigree-lineage-ingress
+      steps:
+        # Step 1: Route 10% traffic/work to canary pods
+        - setWeight: 10
+        # Step 2: Pause for 2 minutes to observe initial metric stability
+        - pause:
+            duration: 2m
+        # Step 3: Run automated metric analysis against Prometheus
+        - analysis:
+            templates:
+              - templateName: pedigree-worker-canary-analysis
+            args:
+              - name: service-name
+                value: pedigree-lineage-worker
+        # Step 4: Scale canary to 30%
+        - setWeight: 30
+        - pause:
+            duration: 3m
+        # Step 5: Scale canary to 60%
+        - setWeight: 60
+        - pause:
+            duration: 2m
+        # Step 6: Full 100% rollout promotion
+        - setWeight: 100
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pedigree-lineage-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pedigree-lineage-worker
+        app.kubernetes.io/component: worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/actuator/prometheus"
+        prometheus.io/port: "8080"
+    spec:
+      serviceAccountName: pedigree-lineage-sa
+      terminationGracePeriodSeconds: 90
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/name
+                      operator: In
+                      values:
+                        - pedigree-lineage-worker
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: worker
+          image: registry.edevlet.gov.tr/pedigree/lineage-service:1.1.0-canary
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: pedigree-lineage-config
+            - secretRef:
+                name: pedigree-lineage-db-secret
+            - secretRef:
+                name: pedigree-lineage-kafka-secret
+            - secretRef:
+                name: pedigree-lineage-redis-secret
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "production"
+            - name: SPRING_KAFKA_LISTENER_CONCURRENCY
+              value: "3"
+            - name: SPRING_KAFKA_CONSUMER_MAX_POLL_RECORDS
+              value: "20"
+            - name: SPRING_LIFECYCLE_TIMEOUT_PER_SHUTDOWN_PHASE
+              value: "60s"
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            limits:
+              cpu: 2000m
+              memory: 2048Mi
+            requests:
+              cpu: 500m
+              memory: 512Mi

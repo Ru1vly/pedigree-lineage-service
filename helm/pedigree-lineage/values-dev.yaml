@@ -1,0 +1,28 @@
+# Environment specific values for Development
+global:
+  environment: dev
+
+api:
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+worker:
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1024Mi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+
+keda:
+  minReplicaCount: 1
+  maxReplicaCount: 6   # <= kafka.topicPartitions; one consumer per partition is the ceiling
+  lagThreshold: 100 # Lower consumer-lag threshold for dev testing

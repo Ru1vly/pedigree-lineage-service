@@ -1,0 +1,28 @@
+# Values tailored for Argo Rollouts / Flux Flagger Canary Releases
+global:
+  environment: production-canary
+
+worker:
+  useArgoRollout: true
+  image:
+    tag: "1.1.0-canary"
+
+argoRollouts:
+  enabled: true
+  canary:
+    steps:
+      - setWeight: 10
+      - pause: { duration: 2m }
+      - analysis:
+          templates:
+            - templateName: pedigree-worker-canary-analysis
+      - setWeight: 30
+      - pause: { duration: 3m }
+      - setWeight: 60
+      - pause: { duration: 2m }
+      - setWeight: 100
+
+flux:
+  enabled: true
+  flagger:
+    enabled: true

@@ -1,0 +1,50 @@
+{{- if and .Values.worker.enabled .Values.keda.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ .Values.keda.scaledObjectName | default (printf "%s-worker-scaler" (include "pedigree-lineage.fullname" .)) }}
+  labels:
+    {{- include "pedigree-lineage.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker-scaler
+spec:
+  scaleTargetRef:
+    {{- if .Values.worker.useArgoRollout }}
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    {{- else }}
+    apiVersion: apps/v1
+    kind: Deployment
+    {{- end }}
+    name: {{ include "pedigree-lineage.fullname" . }}-worker
+  minReplicaCount: {{ .Values.keda.minReplicaCount }}
+  maxReplicaCount: {{ .Values.keda.maxReplicaCount }}
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: {{ .Values.keda.hpaBehavior.scaleUp.stabilizationWindowSeconds }}
+          selectPolicy: {{ .Values.keda.hpaBehavior.scaleUp.selectPolicy }}
+          policies:
+            {{- toYaml .Values.keda.hpaBehavior.scaleUp.policies | nindent 12 }}
+        scaleDown:
+          stabilizationWindowSeconds: {{ .Values.keda.hpaBehavior.scaleDown.stabilizationWindowSeconds }}
+          selectPolicy: {{ .Values.keda.hpaBehavior.scaleDown.selectPolicy }}
+          policies:
+            {{- toYaml .Values.keda.hpaBehavior.scaleDown.policies | nindent 12 }}
+  triggers:
+    - type: {{ .Values.keda.triggerType }}
+      metadata:
+        bootstrapServers: {{ .Values.kafka.bootstrapServers | quote }}
+        consumerGroup: {{ .Values.keda.consumerGroup | quote }}
+        topic: {{ .Values.keda.topic | quote }}
+        lagThreshold: {{ .Values.keda.lagThreshold | quote }}
+        activationLagThreshold: {{ .Values.keda.activationLagThreshold | quote }}
+        offsetResetPolicy: {{ .Values.keda.offsetResetPolicy | quote }}
+        excludePersistentLag: {{ .Values.keda.excludePersistentLag | quote }}
+      {{- if .Values.keda.auth.enabled }}
+      authenticationRef:
+        name: {{ include "pedigree-lineage.fullname" . }}-keda-kafka-auth
+      {{- end }}
+{{- end }}

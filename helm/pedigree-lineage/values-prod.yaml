@@ -1,0 +1,58 @@
+# Environment specific values for Production
+global:
+  environment: production
+
+api:
+  replicaCount: 5
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 2048Mi
+    requests:
+      cpu: 500m
+      memory: 1024Mi
+
+worker:
+  replicaCount: 2
+  terminationGracePeriodSeconds: 120
+  resources:
+    limits:
+      cpu: 4000m
+      memory: 4096Mi
+    requests:
+      cpu: 1000m
+      memory: 1024Mi
+
+keda:
+  enabled: true
+  minReplicaCount: 2
+  maxReplicaCount: 12  # <= kafka.topicPartitions; one consumer per partition is the ceiling
+  lagThreshold: 1000
+  pollingInterval: 5
+  cooldownPeriod: 300
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+# --------------------------------------------------------------------------------------------
+# SECURITY: every value below is still a placeholder distinct from the chart's dev defaults, to
+# prove the override path is wired up end to end - it is NOT a real production secret. Before a
+# real deploy, replace these with --set-string / a values file kept out of version control, or
+# switch to existingSecret / existingAppSecret and point at a Secret your platform (Vault Agent
+# Injector, ExternalSecrets, ...) already manages. The app refuses to start under this profile
+# ("production", see docker/Helm SPRING_PROFILES_ACTIVE) if these are left at their repo default.
+# --------------------------------------------------------------------------------------------
+kafka:
+  password: "changeme-prod-kafka-password-REPLACE-BEFORE-REAL-DEPLOY"
+
+postgresql:
+  password: "changeme-prod-postgresql-password-REPLACE-BEFORE-REAL-DEPLOY"
+
+security:
+  jwt:
+    secret: "changeme-prod-jwt-hmac-secret-REPLACE-BEFORE-REAL-DEPLOY-min-32-bytes"
+  encryption:
+    masterKey: "changeme-prod-tckn-encryption-key-REPLACE-BEFORE-REAL-DEPLOY"
+  vault:
+    token: "changeme-prod-vault-token-REPLACE-BEFORE-REAL-DEPLOY"

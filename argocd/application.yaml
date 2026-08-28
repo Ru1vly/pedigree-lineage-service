@@ -1,0 +1,43 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: pedigree-lineage-prod
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  labels:
+    env: production
+    app.kubernetes.io/part-of: pedigree-lineage
+spec:
+  project: default
+  source:
+    repoURL: 'https://github.com/edevlet/pedigree-lineage-service.git'
+    targetRevision: HEAD
+    path: helm/pedigree-lineage
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-prod.yaml
+        - values-canary.yaml
+      parameters:
+        - name: "worker.useArgoRollout"
+          value: "true"
+        - name: "keda.enabled"
+          value: "true"
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: pedigree-lineage
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

@@ -1,0 +1,162 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: pedigree-lineage-service
+  lifecycle:
+    timeout-per-shutdown-phase: 60s
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/lineagedb}
+    username: ${SPRING_DATASOURCE_USERNAME:lineageuser}
+    password: ${SPRING_DATASOURCE_PASSWORD:lineagepass}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      idle-timeout: 300000
+      max-lifetime: 1800000
+      connection-timeout: 30000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  kafka:
+    bootstrap-servers: ${SPRING_KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: ${SPRING_KAFKA_CONSUMER_GROUP_ID:lineage-worker-group}
+      auto-offset-reset: earliest
+    listener:
+      concurrency: ${SPRING_KAFKA_LISTENER_CONCURRENCY:3}
+
+  data:
+    redis:
+      host: ${SPRING_REDIS_HOST:localhost}
+      port: ${SPRING_REDIS_PORT:6379}
+      timeout: 2000ms
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${SPRING_SECURITY_OAUTH2_ISSUER_URI:http://localhost:8081/realms/e-devlet}
+
+  cloud:
+    vault:
+      enabled: ${SPRING_CLOUD_VAULT_ENABLED:true}
+      host: ${SPRING_CLOUD_VAULT_HOST:localhost}
+      port: ${SPRING_CLOUD_VAULT_PORT:8200}
+      scheme: ${SPRING_CLOUD_VAULT_SCHEME:http}
+      authentication: TOKEN
+      token: ${SPRING_CLOUD_VAULT_TOKEN:root}
+      fail-fast: false
+      config:
+        lifecycle:
+          enabled: true
+          min-ttl: 1h
+          time-to-live: 1h
+      database:
+        enabled: true
+        role: pedigree-db-role
+        backend: database
+
+app:
+  kafka:
+    listener:
+      # Disabled only under the "test" profile (pure H2/mocked-Redis unit tests) so the listener
+      # container doesn't spin up a background consumer thread retrying against a Kafka broker
+      # that was never started - see application-test.yml.
+      auto-startup: ${APP_KAFKA_LISTENER_AUTO_STARTUP:true}
+  pipeline:
+    phase-delay-ms: 1500
+  security:
+    # Every default below is deliberately obvious/insecure so a fresh clone still boots for
+    # local development. SecretsConfigurationGuard refuses to start under the "production"
+    # Spring profile if any of these are left unchanged — see values-prod.yaml for the
+    # per-environment overrides that must be supplied instead.
+    jwt:
+      # Shared HS256 secret. Development only - it both signs (DevTokenController) and verifies,
+      # so whoever holds it can forge any identity or role. Used only when neither jwk-set-uri nor
+      # issuer-uri below is set; SecretsConfigurationGuard refuses to start under the "production"
+      # profile in that case.
+      secret: ${JWT_HMAC_SECRET:local-dev-only-insecure-default-CHANGE-ME-2026-not-for-production-use}
+      # Point either of these at the real OIDC provider to switch to asymmetric validation against
+      # its published signing keys. jwk-set-uri wins; issuer-uri alone uses OIDC discovery. Both
+      # additionally validate the iss claim, and audience below validates aud when set.
+      jwk-set-uri: ${JWT_JWK_SET_URI:}
+      issuer-uri: ${JWT_ISSUER_URI:}
+      audience: ${JWT_AUDIENCE:}
+    vault:
+      enabled: ${VAULT_TRANSIT_ENABLED:true}
+    encryption:
+      master-key: ${TCKN_ENCRYPTION_MASTER_KEY:local-dev-only-insecure-default-CHANGE-ME-2026-not-for-production-use-tckn-key}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # env and loggers are deliberately NOT exposed by default: /env leaks resolved
+        # configuration (secrets included) and /loggers accepts POSTs that mutate log levels at
+        # runtime. SecurityConfig gates /actuator/** behind ROLE_ADMIN as the primary control;
+        # keeping them off the exposure list is the second layer. Opt in per-environment via
+        # MANAGEMENT_ENDPOINTS_EXPOSURE only where an operator-only network path exists.
+        include: ${MANAGEMENT_ENDPOINTS_EXPOSURE:health,info,metrics,prometheus}
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+  tracing:
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      endpoint: ${MANAGEMENT_ZIPKIN_TRACING_ENDPOINT:http://localhost:9411/api/v2/spans}
+
+resilience4j:
+  ratelimiter:
+    # A named config template, not a single pre-built instance: RateLimitingFilter creates one
+    # RateLimiter PER CLIENT KEY via registry.rateLimiter(clientKey, "lineageIngress"), and every
+    # one of those instances is configured from this shared template. Declaring this under
+    # "instances" instead of "configs" builds a single eagerly-created limiter named
+    # "lineageIngress" itself and does NOT register a config retrievable by that name, which is
+    # what registry.rateLimiter(key, "lineageIngress") needs - see SecurityFilterChainTest.
+    configs:
+      lineageIngress:
+        limitForPeriod: 10
+        limitRefreshPeriod: 1m
+        timeoutDuration: 100ms
+  circuitbreaker:
+    instances:
+      legacyCensusBackend:
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: 10
+        minimumNumberOfCalls: 5
+        failureRateThreshold: 50
+        waitDurationInOpenState: 10000ms
+        permittedNumberOfCallsInHalfOpenState: 3
+
+logging:
+  level:
+    root: INFO
+    com.edevlet.lineage: DEBUG
+    org.springframework.security: INFO
+    org.apache.kafka: WARN
+    org.springframework.kafka: INFO
+

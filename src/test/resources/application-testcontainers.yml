@@ -1,0 +1,53 @@
+# Used only by tests that stand up real infrastructure via Testcontainers (see
+# LineageMessagingTestcontainersTest). Unlike application-test.yml, this profile does NOT
+# exclude KafkaAutoConfiguration/RedisAutoConfiguration and does NOT disable Flyway - the whole
+# point is to exercise the real outbox -> Debezium CDC -> Kafka -> worker path and the real
+# Flyway-managed Postgres schema, not mocks. Datasource/Kafka/redis connection details are
+# supplied at runtime by @DynamicPropertySource once the containers are up.
+spring:
+  application:
+    name: pedigree-lineage-service-testcontainers
+
+  datasource:
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 5
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  kafka:
+    consumer:
+      group-id: lineage-worker-testcontainers-group
+    listener:
+      concurrency: 1
+
+  cloud:
+    vault:
+      enabled: false
+
+app:
+  pipeline:
+    phase-delay-ms: 50
+  security:
+    jwt:
+      secret: test-only-hmac-secret-not-for-production-use-32-bytes-minimum
+    vault:
+      enabled: false
+    encryption:
+      master-key: edevlet-tckn-test-encryption-key-2026
+
+logging:
+  level:
+    root: INFO
+    com.edevlet.lineage: DEBUG

@@ -1,0 +1,56 @@
+spring:
+  application:
+    name: pedigree-lineage-service-test
+
+  datasource:
+    url: jdbc:h2:mem:lineage_test_db;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE;MODE=PostgreSQL
+    username: sa
+    password: ""
+    driver-class-name: org.h2.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+
+  flyway:
+    enabled: false
+
+  cloud:
+    vault:
+      enabled: false
+
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.cloud.vault.config.VaultAutoConfiguration
+
+  main:
+    allow-bean-definition-overriding: true
+
+app:
+  kafka:
+    listener:
+      # KafkaConfig builds its consumer/producer factories directly from spring.kafka.* properties
+      # (not from KafkaAutoConfiguration's beans), so those factories exist fine here regardless -
+      # this only stops the listener container's background consumer thread from repeatedly
+      # retrying against a Kafka broker that was never started in this H2/mocked-Redis profile.
+      auto-startup: false
+  pipeline:
+    phase-delay-ms: 100
+  security:
+    jwt:
+      secret: test-only-hmac-secret-not-for-production-use-32-bytes-minimum
+    vault:
+      enabled: false
+    encryption:
+      master-key: edevlet-tckn-test-encryption-key-2026
+
+logging:
+  level:
+    root: INFO
+    com.edevlet.lineage: DEBUG
