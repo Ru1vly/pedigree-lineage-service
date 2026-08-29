@@ -12,7 +12,10 @@ import org.slf4j.MDC;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
+import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
+import org.springframework.security.web.util.matcher.RequestMatcher;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
@@ -60,6 +63,22 @@ import java.util.List;
 public class RateLimitingFilter extends OncePerRequestFilter {
 
     public static final String KEY_PREFIX = "ratelimit:lineage:ingress:";
+
+    /**
+     * The submission endpoint this filter guards.
+     *
+     * <p>Previously matched with {@code request.getRequestURI().endsWith(...)}, which is the wrong
+     * tool for deciding whether a security-adjacent control applies. String comparison on the raw
+     * URI answers a different question from the one the dispatcher will answer when it routes the
+     * request: it knows nothing about the context path, path parameters, encoding or the servlet
+     * mapping, so "does this filter apply" and "which handler runs" were being decided by two
+     * different rules. Spring Boot 3 turning off trailing-slash matching is what kept the two
+     * agreeing here; that is a default, not a guarantee, and a control that is safe only because
+     * of one is not a control. A {@code RequestMatcher} is the same machinery the security chain
+     * itself matches with.
+     */
+    private static final RequestMatcher QUERY_SUBMISSION_MATCHER =
+            new AntPathRequestMatcher("/api/v1/lineage/queries", HttpMethod.POST.name());
 
     /**
      * INCR then, only on the first hit of a window, PEXPIRE. Both run inside one Redis script so
@@ -147,7 +166,7 @@ public class RateLimitingFilter extends OncePerRequestFilter {
     }
 
     private boolean isQuerySubmissionRequest(HttpServletRequest request) {
-        return "POST".equalsIgnoreCase(request.getMethod()) && request.getRequestURI().endsWith("/api/v1/lineage/queries");
+        return QUERY_SUBMISSION_MATCHER.matches(request);
     }
 
     private void writeRateLimitResponse(

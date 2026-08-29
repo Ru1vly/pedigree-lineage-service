@@ -22,7 +22,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Runs V1-V4 against a real PostgreSQL and validates the JPA mappings against the result.
+ * Runs every migration against a real PostgreSQL and validates the JPA mappings against the result.
  *
  * <p>Why this exists: the fast unit profile (application-test.yml) disables Flyway and lets
  * Hibernate build an H2 schema with {@code ddl-auto: update}. Production runs the opposite -
@@ -86,11 +86,29 @@ class FlywaySchemaMigrationTest {
                 "SELECT version FROM flyway_schema_history WHERE success = true AND version IS NOT NULL "
                         + "ORDER BY installed_rank", "version");
 
-        assertThat(versions).containsExactly("1", "2", "3", "4");
+        assertThat(versions).containsExactly("1", "2", "3", "4", "5");
 
         List<String> failed = queryColumn(
                 "SELECT version FROM flyway_schema_history WHERE success = false", "version");
         assertThat(failed).isEmpty();
+    }
+
+    @Test
+    @DisplayName("V5 records the national_id encryption contract where a DBA reading the column will see it")
+    void nationalIdColumnsCarryTheirEncryptionContract() throws Exception {
+        // V2 is named encrypt_tckn_column and encrypts nothing - it widens the column, and no
+        // backfill is possible in SQL because the key is deliberately not in the database. So the
+        // column holds a mixture of formats, and the only place to say so is on the column itself.
+        List<String> comments = queryColumn(
+                "SELECT col_description(c.oid, a.attnum) AS comment "
+                        + "FROM pg_class c "
+                        + "JOIN pg_attribute a ON a.attrelid = c.oid "
+                        + "WHERE c.relname IN ('lineage_queries', 'lineage_audit_logs') "
+                        + "AND a.attname = 'national_id'", "comment");
+
+        assertThat(comments).hasSize(2);
+        assertThat(comments).allSatisfy(comment ->
+                assertThat(comment).contains("Encrypted at rest by the application"));
     }
 
     @Test

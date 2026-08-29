@@ -1,5 +1,6 @@
 package com.edevlet.lineage;
 
+import com.edevlet.lineage.config.SseProperties;
 import com.edevlet.lineage.domain.model.NationalIdentityContext;
 import com.edevlet.lineage.domain.model.ProcessingPhase;
 import com.edevlet.lineage.domain.model.TaskStatus;
@@ -10,6 +11,7 @@ import com.edevlet.lineage.infrastructure.security.UserSecurityContextHolder;
 import com.edevlet.lineage.infrastructure.security.encryption.TcknEncryptionService;
 import com.edevlet.lineage.service.LineageQueryService;
 import com.edevlet.lineage.web.LineageQueryController;
+import com.edevlet.lineage.web.SseStreamGate;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -53,11 +55,18 @@ class LineageQueryControllerTest {
 
     /**
      * The SSE progress endpoint schedules its polling on the shared scheduler declared by
-     * AsyncConfig, which this @WebMvcTest slice does not load. None of the tests here exercise the
-     * stream, so a mock satisfies the controller's constructor without pulling in the whole config.
+     * AsyncConfig, admits connections through SseStreamGate, and reads its interval and timeout
+     * from SseProperties - none of which this @WebMvcTest slice loads. No test here exercises the
+     * stream, so mocks satisfy the controller's constructor without pulling in the whole config.
      */
     @MockBean
     private ThreadPoolTaskScheduler sseProgressScheduler;
+
+    @MockBean
+    private SseStreamGate sseStreamGate;
+
+    @MockBean
+    private SseProperties sseProperties;
 
     private NationalIdentityContext mockIdentityContext;
 

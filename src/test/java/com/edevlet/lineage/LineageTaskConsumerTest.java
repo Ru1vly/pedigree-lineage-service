@@ -5,6 +5,7 @@ import com.edevlet.lineage.infrastructure.messaging.KafkaConfig;
 import com.edevlet.lineage.infrastructure.messaging.LineageQueryMessage;
 import com.edevlet.lineage.infrastructure.messaging.LineageTaskConsumer;
 import com.edevlet.lineage.infrastructure.pipeline.LineagePipelineOrchestrator;
+import com.edevlet.lineage.infrastructure.pipeline.PipelineRetryProperties;
 import com.edevlet.lineage.infrastructure.security.UserSecurityContextHolder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -39,7 +40,7 @@ class LineageTaskConsumerTest {
     private final ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
 
     private LineageTaskConsumer consumer() {
-        return new LineageTaskConsumer(orchestrator, objectMapper);
+        return new LineageTaskConsumer(orchestrator, objectMapper, new PipelineRetryProperties());
     }
 
     @Test

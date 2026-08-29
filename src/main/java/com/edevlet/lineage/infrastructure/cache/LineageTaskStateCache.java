@@ -22,8 +22,7 @@ import java.util.Optional;
  * <p>It previously had one end. LineagePipelinePhaseRunner wrote a JSON blob under that key on
  * every phase transition and nothing anywhere read it back - status polling went to Postgres on
  * every request, including the SSE stream's poll loop. The cache cost a Redis round trip per phase
- * and bought nothing: dead plumbing of exactly the kind section 6 of docs/WHAT_WAS_BROKEN.md was
- * written about.
+ * and bought nothing - documented infrastructure that was never wired to anything.
  *
  * <p>Two deliberate constraints on what is cached:
  *

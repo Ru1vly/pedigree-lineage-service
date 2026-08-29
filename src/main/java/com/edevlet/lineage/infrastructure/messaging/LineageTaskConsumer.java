@@ -2,6 +2,7 @@ package com.edevlet.lineage.infrastructure.messaging;
 
 import com.edevlet.lineage.domain.model.NationalIdentityContext;
 import com.edevlet.lineage.infrastructure.pipeline.LineagePipelineOrchestrator;
+import com.edevlet.lineage.infrastructure.pipeline.PipelineRetryProperties;
 import com.edevlet.lineage.infrastructure.security.UserSecurityContextHolder;
 import com.edevlet.lineage.infrastructure.tracing.TracingMdcFilter;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -12,6 +13,8 @@ import org.slf4j.MDC;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Set;
 
 @Slf4j
@@ -21,6 +24,7 @@ public class LineageTaskConsumer {
 
     private final LineagePipelineOrchestrator pipelineOrchestrator;
     private final ObjectMapper objectMapper;
+    private final PipelineRetryProperties retryProperties;
 
     @KafkaListener(
             topics = KafkaConfig.TOPIC_LINEAGE_QUERY_EVENTS,
@@ -31,11 +35,55 @@ public class LineageTaskConsumer {
         log.info("Received lineage query task from Kafka (Debezium outbox CDC event). transactionId={}, userId={}",
                 message.getTransactionId(), message.getUserId());
 
+        awaitRetrySchedule(message);
+
         try {
             populateExecutionContext(message);
             pipelineOrchestrator.executePipeline(message);
         } finally {
             cleanupExecutionContext();
+        }
+    }
+
+    /**
+     * Holds a re-queued attempt until the backoff its producer stamped on it has elapsed.
+     *
+     * <p>A pipeline retry is published as an outbox row and Debezium puts it on Kafka within
+     * milliseconds - the outbox exists to publish immediately and there is no delay to be taken
+     * there. So a failing task's entire retry budget used to arrive back-to-back at a legacy census
+     * backend that was already struggling, with only the circuit breaker between the two.
+     *
+     * <p>This does block a listener thread, which is a real cost and the reason it is capped at
+     * {@code app.pipeline.retry.max-consumer-deferral}: the alternative is retrying a failing
+     * backend as fast as the broker can deliver, and the waits involved are seconds. A delay topic
+     * is the right answer if the budget ever needs to stretch beyond that. Initial submissions
+     * carry no schedule and are never delayed.
+     */
+    private void awaitRetrySchedule(LineageQueryMessage message) {
+        if (message.getRetryNotBefore() == null) {
+            return;
+        }
+
+        Duration remaining = Duration.between(Instant.now(), message.getRetryNotBefore());
+        if (remaining.isNegative() || remaining.isZero()) {
+            return;
+        }
+
+        Duration cappedWait = remaining.compareTo(retryProperties.getMaxConsumerDeferral()) > 0
+                ? retryProperties.getMaxConsumerDeferral()
+                : remaining;
+
+        log.info("Deferring retry attempt {} for transactionId={} by {} before re-entering the pipeline.",
+                message.getRetryAttempt(), message.getTransactionId(), cappedWait);
+        try {
+            Thread.sleep(cappedWait.toMillis());
+        } catch (InterruptedException interrupted) {
+            // A shutdown or a container stop. Restore the flag and let the attempt proceed
+            // immediately rather than swallowing the signal; the record is not yet acknowledged,
+            // so a shutdown here simply redelivers it.
+            Thread.currentThread().interrupt();
+            log.warn("Interrupted while deferring retry for transactionId={}; proceeding without the remaining backoff.",
+                    message.getTransactionId());
         }
     }
 

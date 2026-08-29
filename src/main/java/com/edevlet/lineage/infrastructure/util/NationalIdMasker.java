@@ -7,7 +7,7 @@ package com.edevlet.lineage.infrastructure.util;
  * <p>Both copies returned the literal {@code "123*****901"} when handed null or a short value.
  * That is a well-formed, entirely plausible masked national ID for a citizen who does not exist,
  * written into logs and into the {@code rootPerson} of stored ancestry results - the same move
- * this codebase rejects in docs/WHAT_WAS_BROKEN.md section 4, where a census-backend fallback
+ * this codebase rejects in {@code LegacyCensusGraphClientImpl}, where a census-backend fallback
  * invented ancestors that downstream code could not tell from real ones. A masked identity is
  * still an identity; a placeholder that looks like one is a fabricated record.
  *

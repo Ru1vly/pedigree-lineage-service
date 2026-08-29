@@ -1,6 +1,7 @@
 package com.edevlet.lineage.domain.model;
 
 import com.edevlet.lineage.infrastructure.security.encryption.TcknAttributeConverter;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -26,6 +27,14 @@ public class LineageAuditLog {
     @Column(name = "user_id", nullable = false, length = 128)
     private String userId;
 
+    /**
+     * Decrypted by {@link TcknAttributeConverter} on load, so it holds the citizen's real TCKN in
+     * memory. {@code @JsonIgnore} is the backstop that keeps it from leaving the process if this
+     * entity is ever handed to Jackson: the admin audit endpoint did exactly that and served the
+     * whole trail in cleartext. The controller projects to a masked DTO; this annotation is what
+     * makes the next accidental {@code ResponseEntity.ok(entity)} harmless rather than a breach.
+     */
+    @JsonIgnore
     @Convert(converter = TcknAttributeConverter.class)
     @Column(name = "national_id", nullable = false, length = 512)
     private String nationalId;

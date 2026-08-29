@@ -12,6 +12,7 @@ import com.edevlet.lineage.dto.LineageQueryRequest;
 import com.edevlet.lineage.dto.LineageQueryStatusResponse;
 import com.edevlet.lineage.infrastructure.cache.LineageTaskStateCache;
 import com.edevlet.lineage.infrastructure.messaging.LineageQueryMessage;
+import com.edevlet.lineage.infrastructure.pipeline.PipelineRetryProperties;
 import com.edevlet.lineage.infrastructure.util.UuidV7Generator;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -35,6 +36,7 @@ public class LineageQueryService {
     private final LineageAuditLogRepository auditLogRepository;
     private final LineageTaskStateCache stateCache;
     private final ObjectMapper objectMapper;
+    private final PipelineRetryProperties retryProperties;
 
     @Transactional
     public LineageQueryAcceptedResponse submitQuery(LineageQueryRequest request, NationalIdentityContext identity) {
@@ -107,8 +109,15 @@ public class LineageQueryService {
      * built for - while a COMPLETED task needs its ancestry result, which the cache deliberately
      * does not carry, and a FAILED one is read rarely. The ownership check runs identically on both
      * paths: a cache read that skipped it would be a way to read another citizen's task.
+     *
+     * <p>Deliberately NOT {@code @Transactional}. It was, and that made the cache-hit path -
+     * the hot one, the one the SSE stream drives on a fixed interval - borrow a connection from
+     * the pool and open a read transaction before discovering it did not need the database at all.
+     * A cache that avoids the query but not the transaction has given back most of what it was
+     * for. The database path below still runs transactionally: Spring Data's repository methods
+     * are transactional in their own right, and this method reads column values from a single row
+     * with nothing lazy behind it, so there is no cross-call consistency here to preserve.
      */
-    @Transactional(readOnly = true)
     public LineageQueryStatusResponse getQueryStatus(String transactionId, NationalIdentityContext identity) {
         Optional<LineageTaskStateCache.CachedTaskState> cachedState = stateCache.read(transactionId);
         if (cachedState.isPresent() && !cachedState.get().status().isTerminal()) {
@@ -245,7 +254,10 @@ public class LineageQueryService {
                 .documentFormat(request.getDocumentFormat())
                 .requestPayload(toJson(request))
                 .retryCount(0)
-                .maxRetries(3)
+                // Configuration, not a literal: this is one multiplicand of the retry budget aimed
+                // at the legacy census backend, and the other lives in resilience4j's config. Both
+                // have to be visible in one place to be reasoned about - see PipelineRetryProperties.
+                .maxRetries(retryProperties.getMaxRetries())
                 .traceId(traceId)
                 .build();
     }

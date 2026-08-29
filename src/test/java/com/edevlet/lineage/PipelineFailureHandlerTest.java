@@ -10,14 +10,17 @@ import com.edevlet.lineage.domain.repository.TransactionalOutboxRepository;
 import com.edevlet.lineage.infrastructure.cache.LineageTaskStateCache;
 import com.edevlet.lineage.infrastructure.messaging.LineageQueryMessage;
 import com.edevlet.lineage.infrastructure.pipeline.PipelineFailureHandler;
+import com.edevlet.lineage.infrastructure.pipeline.PipelineRetryProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.time.Instant;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -47,13 +50,16 @@ class PipelineFailureHandlerTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    private final PipelineRetryProperties retryProperties = new PipelineRetryProperties();
+
     private PipelineFailureHandler failureHandler;
 
     @BeforeEach
     void setUp() {
         objectMapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
         failureHandler = new PipelineFailureHandler(
-                queryRepository, auditLogRepository, outboxRepository, stateCache, objectMapper);
+                queryRepository, auditLogRepository, outboxRepository, stateCache, objectMapper,
+                retryProperties);
     }
 
     @Test
@@ -89,6 +95,57 @@ class PipelineFailureHandlerTest {
                         && event.getEventType().equals("LineageQueryRetryRequested")
                         && event.getPayload().contains(txId)));
         verify(auditLogRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("A re-queued attempt carries a not-before instant so the retry budget is not fired back-to-back")
+    void requeuedAttempt_CarriesBackoffSchedule() throws Exception {
+        String txId = UUID.randomUUID().toString();
+        LineageQueryMessage message = LineageQueryMessage.builder()
+                .transactionId(txId)
+                .userId("user-123")
+                .nationalId("12345678950")
+                .build();
+
+        LineageQueryTask task = LineageQueryTask.builder()
+                .id(UUID.randomUUID())
+                .transactionId(txId)
+                .status(TaskStatus.PROCESSING)
+                .retryCount(0)
+                .maxRetries(3)
+                .build();
+
+        given(queryRepository.findByTransactionId(txId)).willReturn(Optional.of(task));
+
+        Instant before = Instant.now();
+        failureHandler.recordFailureAndMaybeRetry(txId, message, new RuntimeException("census backend down"));
+
+        ArgumentCaptor<OutboxEvent> outboxEvent = ArgumentCaptor.forClass(OutboxEvent.class);
+        verify(outboxRepository).save(outboxEvent.capture());
+
+        LineageQueryMessage requeued =
+                objectMapper.readValue(outboxEvent.getValue().getPayload(), LineageQueryMessage.class);
+
+        // Without this, the outbox row is on Kafka within milliseconds of the failure and the next
+        // attempt hits the already-failing census backend immediately - which is the whole reason
+        // the retry budget could be spent as a burst.
+        assertEquals(1, requeued.getRetryAttempt());
+        assertNotNull(requeued.getRetryNotBefore());
+        assertTrue(
+                requeued.getRetryNotBefore().isAfter(before.plus(retryProperties.backoffForAttempt(1)).minusSeconds(1)),
+                "the first retry should be scheduled roughly one backoff interval out, got "
+                        + requeued.getRetryNotBefore());
+    }
+
+    @Test
+    @DisplayName("Backoff grows per attempt and is capped, so a long-failing task does not schedule minutes out")
+    void backoff_GrowsAndIsCapped() {
+        PipelineRetryProperties properties = new PipelineRetryProperties();
+
+        assertEquals(java.time.Duration.ZERO, properties.backoffForAttempt(0));
+        assertEquals(properties.getInitialBackoff(), properties.backoffForAttempt(1));
+        assertTrue(properties.backoffForAttempt(2).compareTo(properties.backoffForAttempt(1)) > 0);
+        assertTrue(properties.backoffForAttempt(99).compareTo(properties.getMaxBackoff()) <= 0);
     }
 
     @Test

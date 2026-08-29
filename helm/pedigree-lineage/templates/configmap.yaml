@@ -10,7 +10,27 @@ data:
   SPRING_DATASOURCE_URL: "jdbc:postgresql://{{ .Values.postgresql.host }}:{{ .Values.postgresql.port }}/{{ .Values.postgresql.database }}"
   SPRING_REDIS_HOST: {{ .Values.redis.host | quote }}
   SPRING_REDIS_PORT: {{ .Values.redis.port | quote }}
-  SPRING_SECURITY_OAUTH2_ISSUER_URI: {{ .Values.security.oauth2.issuerUri | quote }}
+  # JWT_ISSUER_URI, not SPRING_SECURITY_OAUTH2_ISSUER_URI. This chart used to set the latter, and
+  # it did nothing: SecurityConfig declares its own JwtDecoder bean, so Boot's resource-server
+  # auto-configuration backs off and never reads spring.security.oauth2.resourceserver.*. The
+  # cluster therefore looked as though it were validating tokens against Keycloak while the
+  # service was actually validating them with the shared HS256 secret. app.security.jwt.issuer-uri
+  # is the property SecurityConfig reads, and setting it also makes SecretsConfigurationGuard's
+  # "an external identity provider must be configured in production" check pass honestly.
+  JWT_ISSUER_URI: {{ .Values.security.oauth2.issuerUri | quote }}
+  {{- with .Values.security.oauth2.jwkSetUri }}
+  JWT_JWK_SET_URI: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.security.oauth2.audience }}
+  JWT_AUDIENCE: {{ . | quote }}
+  {{- end }}
+  # Not a secret: a KDF salt exists to stop one attacker's precomputation being reusable against
+  # every other deployment, which it does in the clear. It must be per-environment and must never
+  # change once rows exist - changing it re-derives every encryption key. See TcknEncryptionProperties.
+  TCKN_ENCRYPTION_KDF_SALT: {{ .Values.security.encryption.kdfSalt | quote }}
+  TCKN_ENCRYPTION_ACTIVE_KEY_ID: {{ .Values.security.encryption.activeKeyId | quote }}
+  APP_SSE_MAX_CONCURRENT_STREAMS: {{ .Values.sse.maxConcurrentStreams | quote }}
+  APP_SSE_SCHEDULER_POOL_SIZE: {{ .Values.sse.schedulerPoolSize | quote }}
   # Requests reach the pod through the nginx ingress, so getRemoteAddr() is the ingress pod's
   # address and the citizen's real IP is only in X-Forwarded-For. Without this, every audit row
   # would record the ingress instead of the caller. Safe here precisely because the ingress

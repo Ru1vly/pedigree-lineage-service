@@ -48,11 +48,12 @@ spring:
       port: ${SPRING_REDIS_PORT:6379}
       timeout: 2000ms
 
-  security:
-    oauth2:
-      resourceserver:
-        jwt:
-          issuer-uri: ${SPRING_SECURITY_OAUTH2_ISSUER_URI:http://localhost:8081/realms/e-devlet}
+  # NOTE: there is deliberately no spring.security.oauth2.resourceserver.* block here. This service
+  # builds its own JwtDecoder in SecurityConfig, which Boot's resource-server auto-configuration
+  # backs off from (@ConditionalOnMissingBean), so any issuer-uri set under that prefix is read by
+  # nobody and silently changes nothing. It used to be set, pointing at a Keycloak realm, which
+  # read as the configured identity provider while the service was actually validating tokens with
+  # the shared HS256 secret. The property that works is app.security.jwt.issuer-uri, below.
 
   cloud:
     vault:
@@ -113,7 +114,35 @@ app:
     vault:
       enabled: ${VAULT_TRANSIT_ENABLED:true}
     encryption:
+      # Secret backing the active key, and the only key that can read rows still in the legacy
+      # enc:v1:gcm: format. VaultTransitTcknEncryptionService has NO hardcoded fallback for this:
+      # if neither this nor keys.<active-key-id> is set, startup fails rather than encrypting
+      # citizen national IDs under a key committed to the source tree.
       master-key: ${TCKN_ENCRYPTION_MASTER_KEY:local-dev-only-insecure-default-CHANGE-ME-2026-not-for-production-use-tckn-key}
+      # Which key new ciphertexts are written under. Rotation: add the new secret under
+      # keys.<new-id>, point this at it, deploy, and leave the old entry in place until every row
+      # encrypted under it has been rewritten - a key that stored data still references must not be
+      # removed. Ciphertext carries its key id (enc:v2:<keyId>:...), which is what makes this work
+      # at all; the old single-key scheme named no key, so changing it orphaned every historical row.
+      active-key-id: ${TCKN_ENCRYPTION_ACTIVE_KEY_ID:primary}
+      # keys:
+      #   primary: ${TCKN_ENCRYPTION_MASTER_KEY}
+      #   2026-q3: ${TCKN_ENCRYPTION_KEY_2026_Q3}
+      kdf:
+        # PBKDF2-HMAC-SHA256 replaces the previous SHA-256(passphrase), which was unsalted and
+        # uniterated. Derivation runs once per key at startup, not per row, so the iteration count
+        # costs boot time only. The salt is not secret, but it must be set per environment and must
+        # never change once rows exist - changing it re-derives every key.
+        salt: ${TCKN_ENCRYPTION_KDF_SALT:pedigree-lineage-tckn-kdf-salt}
+        iterations: ${TCKN_ENCRYPTION_KDF_ITERATIONS:210000}
+  sse:
+    # Bounds on the progress-stream endpoint. Each open stream is a repeating poll on a shared,
+    # fixed-size scheduler, so concurrency has to be capped somewhere: either the number of streams
+    # is limited explicitly, or the advertised poll interval silently stretches under load. An
+    # explicit 503 is the honest version. See LineageQueryController.
+    max-concurrent-streams: ${APP_SSE_MAX_CONCURRENT_STREAMS:200}
+    scheduler-pool-size: ${APP_SSE_SCHEDULER_POOL_SIZE:8}
+    poll-interval: ${APP_SSE_POLL_INTERVAL:2s}
 
 management:
   endpoints:
@@ -150,6 +179,25 @@ resilience4j:
         failureRateThreshold: 50
         waitDurationInOpenState: 10000ms
         permittedNumberOfCallsInHalfOpenState: 3
+  # LegacyCensusGraphClientImpl carries @Retry(name = "legacyCensusBackend") and this block did not
+  # exist, so the annotation ran on Resilience4j's defaults: 3 attempts, 500ms flat wait, retrying
+  # every exception. Multiplied by the pipeline's own re-queue loop that is a lot of load aimed at a
+  # backend that is already failing - see the retry-budget comment on LegacyCensusGraphClientImpl
+  # for the arithmetic. Configured explicitly now, and deliberately shallow: the pipeline layer
+  # above already retries, so this one only exists to absorb a single transient blip.
+  retry:
+    instances:
+      legacyCensusBackend:
+        maxAttempts: ${RESILIENCE_CENSUS_RETRY_MAX_ATTEMPTS:2}
+        waitDuration: 500ms
+        enableExponentialBackoff: true
+        exponentialBackoffMultiplier: 2
+        # Retrying an open circuit is pure waste: the breaker is refusing the call precisely
+        # because the backend is known to be failing, and every retry burns a permit's worth of
+        # latency to be refused again. Fail fast to the pipeline layer, which applies its own
+        # backoff before the next attempt.
+        ignoreExceptions:
+          - io.github.resilience4j.circuitbreaker.CallNotPermittedException
 
 logging:
   level:

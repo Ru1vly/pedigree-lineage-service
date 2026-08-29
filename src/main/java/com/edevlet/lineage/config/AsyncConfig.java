@@ -34,11 +34,17 @@ public class AsyncConfig implements AsyncConfigurer {
      * the lifetime of the JVM - unbounded, and driven directly by client request volume. One
      * shared pool with {@code removeOnCancelPolicy} means a cancelled poll is discarded straight
      * away rather than lingering in the queue, and Spring shuts the pool down with the context.
+     *
+     * <p>The pool size was then hard-coded at four while the number of streams feeding it stayed
+     * unbounded, which is a bounded queue in front of an unbounded input: the polls do not fail,
+     * they just fall behind, and the two-second interval the endpoint advertises quietly stops
+     * being true. The size is configuration now and {@code SseStreamGate} caps the input, so the
+     * ratio between them is a decision rather than an accident. See {@link SseProperties}.
      */
     @Bean(destroyMethod = "shutdown")
-    public ThreadPoolTaskScheduler sseProgressScheduler() {
+    public ThreadPoolTaskScheduler sseProgressScheduler(SseProperties sseProperties) {
         ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
-        scheduler.setPoolSize(4);
+        scheduler.setPoolSize(sseProperties.getSchedulerPoolSize());
         scheduler.setThreadNamePrefix("sse-progress-");
         // No MdcTaskDecorator here: ThreadPoolTaskScheduler only gained setTaskDecorator in
         // Spring Framework 6.2 and this build is on 6.1.x (Boot 3.3.2). Poll logging therefore

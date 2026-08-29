@@ -1,5 +1,7 @@
 package com.edevlet.lineage.web;
 
+import com.edevlet.lineage.config.SseProperties;
+import com.edevlet.lineage.domain.exception.StreamCapacityExceededException;
 import com.edevlet.lineage.domain.model.NationalIdentityContext;
 import com.edevlet.lineage.dto.LineageQueryAcceptedResponse;
 import com.edevlet.lineage.dto.LineageQueryRequest;
@@ -23,7 +25,6 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.net.URI;
-import java.time.Duration;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -35,12 +36,11 @@ import java.util.concurrent.atomic.AtomicReference;
 @Tag(name = "Lineage Async Ingestion & Status API", description = "e-Devlet Pedigree Family Tree Lineage Async Task Processing Endpoints")
 public class LineageQueryController {
 
-    private static final long SSE_TIMEOUT_MILLIS = 60_000L;
-    private static final long SSE_POLL_INTERVAL_MILLIS = 2_000L;
-
     private final LineageQueryService queryService;
     private final TcknEncryptionService tcknEncryptionService;
     private final ThreadPoolTaskScheduler sseProgressScheduler;
+    private final SseStreamGate sseStreamGate;
+    private final SseProperties sseProperties;
 
     @PostMapping
     @Operation(summary = "Submit Async Lineage Query", description = "Ingests a citizen pedigree query task, rate-limits per user/IP, saves metadata to transactional outbox, and returns HTTP 202 Accepted immediately.")
@@ -99,19 +99,49 @@ public class LineageQueryController {
         return ResponseEntity.noContent().build();
     }
 
+    /**
+     * A polled read published as an event stream, with the poll running on a shared scheduler.
+     *
+     * <p>It is not a push, and the number of streams one instance will serve is capped
+     * ({@code app.sse.max-concurrent-streams}). Without the cap the scheduler's fixed pool sits
+     * behind an input sized purely by client demand: nothing fails, the polls just queue, and every
+     * connected client's interval stretches while the endpoint goes on advertising two seconds.
+     * Refusing the connection that crosses the line is the honest form of the same limit - the
+     * caller gets a 503 with {@code Retry-After} and can fall back to polling the status endpoint.
+     * See {@link SseStreamGate} for the gauge that says how close to the ceiling an instance is.
+     */
     @GetMapping(value = "/{transactionId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     @Operation(summary = "Stream Live Lineage Task Progress (SSE)", description = "Establishes a Server-Sent Events (SSE) stream pushing real-time task progress updates to the client UI.")
+    @ApiResponse(responseCode = "200", description = "Progress Stream Established")
+    @ApiResponse(responseCode = "503", description = "Instance is at its concurrent progress-stream limit")
     public SseEmitter streamLineageProgress(@PathVariable String transactionId) {
         NationalIdentityContext identity = UserSecurityContextHolder.getRequiredContext();
-        log.info("Establishing SSE progress stream for transactionId={}, userId={}", transactionId, identity.userId());
 
-        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MILLIS);
+        if (!sseStreamGate.tryAcquire()) {
+            log.warn("Refusing SSE progress stream for transactionId={}: {} of {} stream slots are in use.",
+                    transactionId, sseStreamGate.activeStreams(), sseStreamGate.maxConcurrentStreams());
+            throw new StreamCapacityExceededException(sseStreamGate.maxConcurrentStreams());
+        }
+
+        log.info("Establishing SSE progress stream for transactionId={}, userId={} ({} of {} slots in use)",
+                transactionId, identity.userId(), sseStreamGate.activeStreams(), sseStreamGate.maxConcurrentStreams());
+
+        SseEmitter emitter = new SseEmitter(sseProperties.getStreamTimeout().toMillis());
 
         // The poll is scheduled on the shared sseProgressScheduler and cancels itself the moment
         // the task reaches a terminal status. The handle is published through an AtomicReference
         // because the first run can fire - and need to cancel itself - before schedule() returns.
         AtomicReference<ScheduledFuture<?>> pollHandle = new AtomicReference<>();
         AtomicBoolean isStreamFinished = new AtomicBoolean(false);
+        // Separate from isStreamFinished: SseEmitter can call both onCompletion and onError for a
+        // single connection, and releasing the slot twice would leak capacity for the life of the
+        // process - the ceiling would drift downwards until the endpoint refused everyone.
+        AtomicBoolean isSlotReleased = new AtomicBoolean(false);
+        Runnable releaseSlotOnce = () -> {
+            if (isSlotReleased.compareAndSet(false, true)) {
+                sseStreamGate.release();
+            }
+        };
 
         Runnable progressPollTask = () -> {
             if (isStreamFinished.get()) {
@@ -131,13 +161,27 @@ public class LineageQueryController {
             }
         };
 
-        // Ensure client disconnects, timeouts, and errors release the scheduler handle immediately
-        emitter.onCompletion(() -> cancelScheduledPoll(isStreamFinished, pollHandle));
+        // Ensure client disconnects, timeouts, and errors release the scheduler handle - and the
+        // stream slot - immediately.
+        emitter.onCompletion(() -> {
+            cancelScheduledPoll(isStreamFinished, pollHandle);
+            releaseSlotOnce.run();
+        });
         emitter.onTimeout(() -> closeStream(emitter, isStreamFinished, pollHandle, null));
-        emitter.onError(error -> cancelScheduledPoll(isStreamFinished, pollHandle));
+        emitter.onError(error -> {
+            cancelScheduledPoll(isStreamFinished, pollHandle);
+            releaseSlotOnce.run();
+        });
 
-        pollHandle.set(sseProgressScheduler.scheduleWithFixedDelay(
-                progressPollTask, Duration.ofMillis(SSE_POLL_INTERVAL_MILLIS)));
+        try {
+            pollHandle.set(sseProgressScheduler.scheduleWithFixedDelay(
+                    progressPollTask, sseProperties.getPollInterval()));
+        } catch (RuntimeException schedulingFailure) {
+            // A rejected task (pool shutting down) must not strand the slot: nothing will ever
+            // complete this emitter, so no callback would return it.
+            releaseSlotOnce.run();
+            throw schedulingFailure;
+        }
 
         if (isStreamFinished.get()) {
             cancelScheduledPoll(isStreamFinished, pollHandle);
@@ -155,6 +199,8 @@ public class LineageQueryController {
             return;
         }
         cancelScheduledPoll(isStreamFinished, pollHandle);
+        // completeWithError / complete fire the emitter callbacks registered above, which is what
+        // returns the stream slot - it is deliberately not released here as well.
         if (failureCause != null) {
             emitter.completeWithError(failureCause);
         } else {

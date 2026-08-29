@@ -12,6 +12,7 @@ import com.edevlet.lineage.domain.repository.TransactionalOutboxRepository;
 import com.edevlet.lineage.dto.LineageQueryRequest;
 import com.edevlet.lineage.dto.LineageQueryStatusResponse;
 import com.edevlet.lineage.infrastructure.cache.LineageTaskStateCache;
+import com.edevlet.lineage.infrastructure.pipeline.PipelineRetryProperties;
 import com.edevlet.lineage.service.LineageQueryService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -65,7 +66,8 @@ class LineageQueryServiceTest {
     @BeforeEach
     void setUp() {
         service = new LineageQueryService(
-                queryRepository, outboxRepository, auditLogRepository, stateCache, objectMapper);
+                queryRepository, outboxRepository, auditLogRepository, stateCache, objectMapper,
+                new PipelineRetryProperties());
     }
 
     private LineageQueryRequest request() {
@@ -108,7 +110,25 @@ class LineageQueryServiceTest {
         assertThat(response.getProgressPercentage()).isEqualTo(35);
         assertThat(response.getCurrentPhase()).isEqualTo(ProcessingPhase.IDENTITY_VERIFICATION);
         // The whole point of the cache: this is the hot path and it must not hit the database.
+        //
+        // What this test cannot see, and what a mocked repository will never show: the method was
+        // @Transactional(readOnly = true), so at runtime a cache hit still borrowed a pooled
+        // connection and opened a read transaction before finding it did not need one. The name of
+        // this test was true of the mock and not of the process. The annotation is gone; the
+        // database path relies on Spring Data's own repository transactions instead.
         verify(queryRepository, never()).findByTransactionId(anyString());
+        assertThat(transactionalAnnotationOn("getQueryStatus")).isNull();
+    }
+
+    private static org.springframework.transaction.annotation.Transactional transactionalAnnotationOn(
+            String methodName) {
+        try {
+            return LineageQueryService.class
+                    .getMethod(methodName, String.class, com.edevlet.lineage.domain.model.NationalIdentityContext.class)
+                    .getAnnotation(org.springframework.transaction.annotation.Transactional.class);
+        } catch (NoSuchMethodException e) {
+            throw new IllegalStateException("LineageQueryService." + methodName + " no longer has this signature", e);
+        }
     }
 
     @Test

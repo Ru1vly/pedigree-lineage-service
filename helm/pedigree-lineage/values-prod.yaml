@@ -54,5 +54,10 @@ security:
     secret: "changeme-prod-jwt-hmac-secret-REPLACE-BEFORE-REAL-DEPLOY-min-32-bytes"
   encryption:
     masterKey: "changeme-prod-tckn-encryption-key-REPLACE-BEFORE-REAL-DEPLOY"
+    # The guard refuses the "production" profile while this is the chart default, so that every
+    # environment derives its keys from its own salt. Pick one per environment and then never
+    # change it: it is an input to the key derivation, so changing it orphans every existing row
+    # exactly as rotating the master key used to.
+    kdfSalt: "changeme-prod-tckn-kdf-salt-REPLACE-BEFORE-REAL-DEPLOY"
   vault:
     token: "changeme-prod-vault-token-REPLACE-BEFORE-REAL-DEPLOY"

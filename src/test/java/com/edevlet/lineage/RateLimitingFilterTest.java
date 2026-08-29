@@ -51,10 +51,25 @@ class RateLimitingFilterTest {
         return new RateLimitingFilter(redisTemplate, objectMapper, limit, Duration.ofMinutes(1));
     }
 
-    private MockHttpServletRequest submissionRequest() {
-        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/api/v1/lineage/queries");
-        request.setRequestURI("/api/v1/lineage/queries");
+    /**
+     * Built the way a servlet container presents it, not just with a request URI.
+     *
+     * <p>The filter decides whether it applies with a {@link org.springframework.security.web.util.matcher.RequestMatcher}
+     * rather than {@code getRequestURI().endsWith(...)}, which means it resolves the path the same
+     * way the security chain does - through the servlet path and path info. Boot maps the
+     * dispatcher at {@code /}, so the container puts the whole path in {@code servletPath}; a
+     * hand-built request that sets only the URI leaves it empty and does not resemble anything the
+     * filter will ever see in production.
+     */
+    private MockHttpServletRequest requestFor(String method, String path) {
+        MockHttpServletRequest request = new MockHttpServletRequest(method, path);
+        request.setRequestURI(path);
+        request.setServletPath(path);
         return request;
+    }
+
+    private MockHttpServletRequest submissionRequest() {
+        return requestFor("POST", "/api/v1/lineage/queries");
     }
 
     @AfterEach
@@ -130,13 +145,35 @@ class RateLimitingFilterTest {
     @Test
     @DisplayName("Requests other than a query submission are not counted at all")
     void nonSubmissionRequest_isNotCounted() throws Exception {
-        MockHttpServletRequest statusRequest = new MockHttpServletRequest("GET", "/api/v1/lineage/queries/abc");
-        statusRequest.setRequestURI("/api/v1/lineage/queries/abc");
         FilterChain chain = mock(FilterChain.class);
 
-        filterWithLimit(10).doFilter(statusRequest, new MockHttpServletResponse(), chain);
+        filterWithLimit(10).doFilter(
+                requestFor("GET", "/api/v1/lineage/queries/abc"), new MockHttpServletResponse(), chain);
 
         verify(chain).doFilter(any(), any());
+        verify(redisTemplate, never()).execute(any(RedisScript.class), any(List.class), any());
+    }
+
+    @Test
+    @DisplayName("The submission path is matched, not merely suffix-compared")
+    void pathMatching_isNotSuffixComparison() throws Exception {
+        FilterChain chain = mock(FilterChain.class);
+
+        // Every one of these ends with the guarded path, or is a near-miss of it. Suffix comparison
+        // on the raw URI answers a different question from the one the dispatcher answers when it
+        // routes the request, and a control that only agrees with the router by coincidence is not
+        // a control.
+        for (String path : List.of(
+                "/evil/api/v1/lineage/queries",
+                "/api/v1/lineage/queries/",
+                "/api/v1/lineage/queries/abc")) {
+            filterWithLimit(10).doFilter(requestFor("POST", path), new MockHttpServletResponse(), chain);
+        }
+
+        // A GET to the real path is not a submission either.
+        filterWithLimit(10).doFilter(
+                requestFor("GET", "/api/v1/lineage/queries"), new MockHttpServletResponse(), chain);
+
         verify(redisTemplate, never()).execute(any(RedisScript.class), any(List.class), any());
     }
 }

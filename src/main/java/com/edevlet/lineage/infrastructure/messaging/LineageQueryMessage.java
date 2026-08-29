@@ -38,4 +38,22 @@ public class LineageQueryMessage implements Serializable {
      */
     private String clientIpAddress;
     private String clientUserAgent;
+
+    /**
+     * Set only on a re-queued attempt: the earliest instant a worker should start this attempt.
+     *
+     * <p>A pipeline retry is published as a fresh outbox row, which Debezium tails off the WAL and
+     * hands to Kafka within milliseconds - so before this field existed, a failing task's next
+     * attempt hit the legacy census backend essentially instantly, and the only thing standing
+     * between a struggling backend and the full retry budget fired back-to-back was the circuit
+     * breaker. There is no delay to be had from the outbox itself (its whole point is that it
+     * publishes as soon as the transaction commits), so the wait is applied by the consumer.
+     *
+     * <p>Null on an initial submission, and on any message enqueued before this field existed;
+     * both mean "start now".
+     */
+    private Instant retryNotBefore;
+
+    /** 1 for the first re-queued attempt. 0/absent on an initial submission. */
+    private int retryAttempt;
 }

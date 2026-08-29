@@ -28,8 +28,24 @@ import java.util.List;
  * <p>An open circuit now propagates. The orchestrator catches it, PipelineFailureHandler retries and
  * then records a terminal FAILED with the real cause plus its compliance audit row, and the record
  * reaches the dead-letter topic. That machinery already existed; the fallback was routing around it.
- * A backend outage is a real event and the caller has to be told, exactly as with the Vault decrypt
- * path - see docs/WHAT_WAS_BROKEN.md section 5 for the same argument applied there.
+ * A backend outage is a real event and the caller has to be told - the same argument that makes
+ * {@code VaultTransitTcknEncryptionService.decrypt} throw rather than hand back a value it could
+ * not decrypt.
+ *
+ * <h2>Retry budget</h2>
+ *
+ * <p>{@code @Retry} below is the <em>inner</em> of two retry layers, and for a long time it was an
+ * unconfigured one: {@code application.yml} declared a circuit breaker named
+ * {@code legacyCensusBackend} but no {@code resilience4j.retry} instance, so this annotation ran on
+ * the library's defaults (3 attempts, flat 500ms, retrying everything - including the circuit
+ * breaker's own {@code CallNotPermittedException}, which is the one exception where retrying is
+ * guaranteed pointless). The outer layer is the pipeline's re-queue loop, which fired with no delay
+ * at all. Nothing multiplied the two together: worst case was around twelve calls per task into a
+ * backend that was, by construction, already failing.
+ *
+ * <p>Both layers are now explicit and the product is written down in
+ * {@code PipelineRetryProperties}: three pipeline attempts times two calls each, spread across
+ * seconds of backoff, and an open circuit fails straight through instead of being retried.
  */
 @Slf4j
 @Component

@@ -1,6 +1,7 @@
 package com.edevlet.lineage.domain.model;
 
 import com.edevlet.lineage.infrastructure.security.encryption.TcknAttributeConverter;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
 import lombok.*;
 
@@ -30,6 +31,10 @@ public class LineageQueryTask {
     @Column(name = "idempotency_key", nullable = false, length = 128)
     private String idempotencyKey;
 
+    // Decrypted on load by TcknAttributeConverter. @JsonIgnore for the same reason as on
+    // LineageAuditLog: no endpoint should be able to leak a plaintext TCKN merely by serialising
+    // an entity it happens to be holding.
+    @JsonIgnore
     @Convert(converter = TcknAttributeConverter.class)
     @Column(name = "national_id", nullable = false, length = 512)
     private String nationalId;

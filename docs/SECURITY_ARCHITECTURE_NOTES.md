@@ -4,8 +4,7 @@ Three mechanisms, what each one actually defends against, and where each one sto
 encryption at rest, dynamic Vault credentials, and SPIFFE/SPIRE pod-to-pod mTLS.
 
 Authentication and authorization are not in this document. Those live in
-[`CODE_MAP.md`](CODE_MAP.md) under Security, and the history of getting them wrong is in
-[`WHAT_WAS_BROKEN.md`](WHAT_WAS_BROKEN.md).
+[`CODE_MAP.md`](CODE_MAP.md) under Security.
 
 A note on how to read this. Being precise about what a control does *not* cover is the whole
 value of a document like this — a control described in terms of what it might plausibly protect
@@ -43,7 +42,7 @@ database.
                                 +-----------------------------------+
                                 | PostgreSQL / Database             |
                                 | national_id VARCHAR(512)          |
-                                | e.g. vault:v1:... or enc:v1:gcm:..|
+                                | e.g. vault:v1:... or enc:v2:<key>:.|
                                 +-----------------------------------+
 ```
 
@@ -54,14 +53,44 @@ has to remember to call it. Add a new entity with a TCKN field, annotate it
 and you have written plaintext, so that annotation is the thing to check in review.
 
 `VaultTransitTcknEncryptionService` prefers Vault Transit (`/v1/transit/encrypt/tckn-key`,
-producing a `vault:v1:` prefix) and falls back to local AES-256-GCM envelope encryption
-(`enc:v1:gcm:`) with a SHA-256 derived master key, random 12-byte IVs and 128-bit auth tags.
+producing a `vault:v1:` prefix) and falls back to local AES-256-GCM (`enc:v2:<keyId>:`) with
+random 12-byte IVs, 128-bit auth tags, and the key id bound in as additional authenticated data.
 The fallback exists so the service runs without Vault in development and survives a Vault outage
 in production.
+
+**The local path is not envelope encryption, and this document used to say it was.** Envelope
+encryption means a per-item data key, encrypted under a master key and stored beside the
+ciphertext — a key hierarchy, which is what lets the master key rotate without touching the data.
+There is no data key here and no wrapping: it is AES-256-GCM directly under one key derived from
+configuration. That is a defensible choice for an 11-character field, where a per-row wrapped data
+key would be larger than the plaintext and Vault Transit already supplies the hierarchy when
+enabled. It is not the same set of guarantees, so it does not get the same name.
+
+Key derivation is PBKDF2-HMAC-SHA256, salted per key id, run once per key at startup. It was
+`SHA-256(passphrase)` — unsalted, uniterated, one hash per guess for anyone holding a database
+dump, and reusable against every deployment that chose the same passphrase.
+
+**Rotation works, and did not.** Ciphertext carries its key id, so `active-key-id` can move to a
+new key while old rows continue to read under theirs. The previous format's `enc:v1:gcm:` prefix
+looked like a version but named no key: changing `TCKN_ENCRYPTION_MASTER_KEY` did not rotate
+anything, it orphaned every historical row permanently, and every subsequent read of one threw.
+`enc:v1:gcm:` is still readable (under the old SHA-256 derivation, read-only) so existing data
+migrates rather than being abandoned. The procedure is in
+[`CONFIGURATION.md`](CONFIGURATION.md#rotating-the-tckn-encryption-key).
 
 Columns are `VARCHAR(512)` — `V2__encrypt_tckn_column.sql` widened them from `VARCHAR(11)` on
 `lineage_queries` and `lineage_audit_logs`. Ciphertext is much longer than the plaintext it
 replaces, which is obvious in hindsight and easy to forget when adding a new encrypted column.
+
+Note what that migration does **not** do, despite its name: it does not encrypt anything. There
+is no backfill in it, and there cannot be one written in SQL, because the key is deliberately not
+in the database. Rows written before field-level encryption existed are still stored in the clear.
+`V5` records that contract as a column comment, since renaming an applied migration would break
+Flyway validation everywhere it has already run, and the application discriminates on the prefix:
+a bare 11-digit value is accepted as a legacy plaintext row (logged at WARN, rewritten on next
+save) and anything else un-prefixed is rejected. Before that, `decrypt` returned any unrecognised
+value unchanged, so legacy plaintext, corruption, and ciphertext it had failed to handle were
+indistinguishable from one another.
 
 ### Decryption fails loudly, deliberately
 
@@ -86,13 +115,46 @@ around the ORM entirely and reads with raw JDBC:
 String rawDbColumnValue = jdbcTemplate.queryForObject(
     "SELECT national_id FROM lineage_queries WHERE id = ?", String.class, taskId);
 
-assertThat(rawDbColumnValue).startsWith("enc:v1:gcm:");
+assertThat(rawDbColumnValue).startsWith("enc:");
 assertThat(rawDbColumnValue).isNotEqualTo("12345678950");
 ```
 
 `FieldLevelEncryptionJpaTest` does this for both tables. A test that went through the repository
 would prove nothing — the converter would decrypt on the way out and hand back plaintext that
 looked correct whether or not the column was ever encrypted.
+
+### The read path is part of the control
+
+Encrypting the column protects it against someone who reaches the database. It does nothing
+about an endpoint that reads the column through the ORM and serialises the result, because the
+converter decrypts on load — by design.
+
+The admin audit endpoint was exactly that. `LineageAuditAdminController` returned the
+`LineageAuditLog` entity directly, and with no filter supplied it fell through to `findAll()`.
+One authenticated `GET /api/v1/lineage/admin/audit-logs` therefore returned the entire audit
+table, every citizen's TCKN in cleartext JSON, in a single unbounded response. Anyone who
+obtained an admin token could exfiltrate every national ID the system had ever handled without
+going near PostgreSQL, Vault, or the master key — which makes the encryption described above
+beside the point against that adversary. The unbounded read was separately an out-of-memory
+waiting to happen: the trail grows by two or more rows per submitted query and is never trimmed.
+
+Three things changed, in decreasing order of importance:
+
+1. **The API has no unmasked mode.** Responses are built from `AuditLogEntryResponse`, which
+   masks. Not a flag, not a role check — there is no read path through this endpoint that
+   produces a full TCKN. An investigator who genuinely needs one reads it from the database under
+   separate authorisation, which is the control the encryption was bought for.
+2. **Every path is paged**, ordered by timestamp, with the page size capped server-side rather
+   than taken from the query string.
+3. **`nationalId` is `@JsonIgnore` on both entities.** Defence in depth: the projection is what
+   enforces the rule, but this is what makes the next accidental
+   `ResponseEntity.ok(someEntity)` harmless instead of a breach.
+
+The general rule this is an instance of: a field encrypted at rest still needs an answer to
+"what is allowed to read it, and in what form". Adding an endpoint that touches an entity with a
+`@Convert(converter = TcknAttributeConverter.class)` field means answering that question again.
+`LineageAuditAdminControllerTest` asserts the plaintext TCKN does not appear anywhere in the
+response body.
 
 ### What this does not cover
 
@@ -144,7 +206,7 @@ Helm-templated secret. If that matters for your compliance posture, it is open w
 solved problem.
 
 `spring.cloud.vault.fail-fast` is `false`, so the application starts when Vault is unreachable
-and falls back to the static datasource credentials and envelope encryption. That is a
+and falls back to the static datasource credentials and local AES-256-GCM. That is a
 deliberate availability trade: a Vault outage should not take down a citizen-facing service. It
 does mean a long Vault outage leaves you running on static credentials without an obvious alarm,
 so alert on the Vault health indicator rather than assuming startup would have told you.
@@ -199,9 +261,11 @@ When enabling this on an existing namespace, check what is *not* meshed first.
 | Concern | Where |
 |---|---|
 | Encryption interface | [`TcknEncryptionService.java`](../src/main/java/com/edevlet/lineage/infrastructure/security/encryption/TcknEncryptionService.java) |
-| Vault Transit + envelope engine | [`VaultTransitTcknEncryptionService.java`](../src/main/java/com/edevlet/lineage/infrastructure/security/encryption/VaultTransitTcknEncryptionService.java) |
+| Vault Transit + local AES-256-GCM | [`VaultTransitTcknEncryptionService.java`](../src/main/java/com/edevlet/lineage/infrastructure/security/encryption/VaultTransitTcknEncryptionService.java) |
+| Keyring, derivation and rotation | [`TcknEncryptionKeyring.java`](../src/main/java/com/edevlet/lineage/infrastructure/security/encryption/TcknEncryptionKeyring.java), [`TcknEncryptionProperties.java`](../src/main/java/com/edevlet/lineage/infrastructure/security/encryption/TcknEncryptionProperties.java) |
 | JPA converter | [`TcknAttributeConverter.java`](../src/main/java/com/edevlet/lineage/infrastructure/security/encryption/TcknAttributeConverter.java) |
-| Column widening | [`V1__init_lineage_schema.sql`](../src/main/resources/db/migration/V1__init_lineage_schema.sql), [`V2__encrypt_tckn_column.sql`](../src/main/resources/db/migration/V2__encrypt_tckn_column.sql) |
+| Column widening, and what it did not do | [`V1__init_lineage_schema.sql`](../src/main/resources/db/migration/V1__init_lineage_schema.sql), [`V2__encrypt_tckn_column.sql`](../src/main/resources/db/migration/V2__encrypt_tckn_column.sql), [`V5__document_tckn_column_encryption_contract.sql`](../src/main/resources/db/migration/V5__document_tckn_column_encryption_contract.sql) |
+| Masked audit trail projection | [`AuditLogEntryResponse.java`](../src/main/java/com/edevlet/lineage/dto/AuditLogEntryResponse.java), [`LineageAuditAdminController.java`](../src/main/java/com/edevlet/lineage/web/LineageAuditAdminController.java) |
 | Encrypted entities | [`LineageQueryTask.java`](../src/main/java/com/edevlet/lineage/domain/model/LineageQueryTask.java), [`LineageAuditLog.java`](../src/main/java/com/edevlet/lineage/domain/model/LineageAuditLog.java) |
 | Dynamic secrets | [`VaultDynamicSecretsConfig.java`](../src/main/java/com/edevlet/lineage/infrastructure/vault/VaultDynamicSecretsConfig.java) |
 | Startup secret guard | [`SecretsConfigurationGuard.java`](../src/main/java/com/edevlet/lineage/infrastructure/security/SecretsConfigurationGuard.java) |

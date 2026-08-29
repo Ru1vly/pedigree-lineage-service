@@ -106,8 +106,8 @@ record reached the dead-letter topic *without* a specific cause having been reco
 transaction rework that should be rare — the pipeline records the real error code and a
 `LINEAGE_QUERY_FAILED` audit row before it rethrows. Seeing the generic code a lot means either
 the failure happened outside the pipeline's own error handling, or something regressed in the
-transaction boundaries. Read [`WHAT_WAS_BROKEN.md`](WHAT_WAS_BROKEN.md) section 1 before
-assuming it's fine.
+transaction boundaries. Read `PipelineFailureHandler`'s class comment — which explains why the
+failure record is written outside the pipeline's transaction — before assuming it's fine.
 
 **Tasks FAILED with `PIPELINE_EXECUTION_ERROR`.** Normal terminal failure. `error_message` on
 the task row and the audit row's `details` both carry the actual cause. Retries were exhausted
@@ -125,6 +125,26 @@ someone else's.
 predates a key change. This is deliberate: `decrypt` used to return the ciphertext unchanged, so
 callers stored and logged an encrypted blob believing it was a citizen's national ID. Loud
 failure is correct. Fix Vault; do not "fix" the exception.
+
+**`...encrypted under TCKN key id 'X', which is not in the configured keyring`.** A key was
+removed while rows still referenced it. Put it back under
+`app.security.encryption.keys.X` — rotation only removes a key once every row written under it
+has been rewritten. The error names the missing id precisely so this is a config fix, not an
+investigation. Check `app.security.encryption.kdf.salt` too: it is an input to every key's
+derivation, so changing it has the same effect as losing every key at once.
+
+**`Stored national ID is in an unrecognised format`.** The column holds something that is
+neither a ciphertext this service can read nor a well-formed 11-digit TCKN. That is corruption
+or a direct write to the column, and it is deliberately not guessed at. `V5`'s column comment
+lists the formats that are valid.
+
+**503 `STREAM_CAPACITY_EXCEEDED` on `/stream`.** The instance is at
+`app.sse.max-concurrent-streams`. Callers should fall back to polling
+`GET /api/v1/lineage/queries/{txId}`, which is unaffected. Check the
+`lineage_sse_streams_active` gauge: sustained saturation across pods means scale out. Raising the
+ceiling without also raising `app.sse.scheduler-pool-size` just moves the problem from a visible
+503 to an invisible one — every connected client's poll interval stretching past the two seconds
+the endpoint advertises.
 
 **401s after an identity provider change.** Tokens missing a national identity claim, or
 carrying one that fails the TCKN checksum, are now rejected instead of being assigned a

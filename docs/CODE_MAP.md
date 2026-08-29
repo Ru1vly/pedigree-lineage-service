@@ -3,8 +3,8 @@
 Where things live, what happens in what order, and which invariants you are not allowed to
 break. If you are about to change something in `infrastructure/pipeline` or
 `infrastructure/security`, read the relevant section first — several of the odd-looking
-decisions in there are load-bearing and there is a defect writeup
-([`WHAT_WAS_BROKEN.md`](WHAT_WAS_BROKEN.md)) explaining what happened last time they weren't.
+decisions in there are load-bearing, and the class comments on the code say what happened the
+last time they weren't.
 
 ## Layout
 
@@ -92,9 +92,13 @@ needs the ancestry result the cache deliberately does not carry. The ownership c
 paths. On success the runner writes a `LINEAGE_QUERY_COMPLETED` audit row.
 
 **7. Failure** unwinds to the orchestrator, outside any transaction, which calls
-`PipelineFailureHandler.recordFailureAndMaybeRetry`. Under `maxRetries` it flips the task back
+`PipelineFailureHandler.recordFailureAndMaybeRetry`. Under `maxRetries` (from
+`app.pipeline.retry.max-retries`, no longer a literal in the service) it flips the task back
 to SUBMITTED and writes a *new outbox row* — the retry goes back around through Debezium and
-Kafka like any other event, committed atomically with the status change. Over `maxRetries` it
+Kafka like any other event, committed atomically with the status change. That row carries a
+not-before instant, because the outbox publishes as soon as it commits and Debezium delivers in
+milliseconds: without one, the whole retry budget lands on a failing backend back-to-back.
+`LineageTaskConsumer` waits for it, on the listener thread, capped. Over `maxRetries` it
 records FAILED with the real cause plus a `LINEAGE_QUERY_FAILED` audit row, and the
 orchestrator rethrows so Kafka routes the record to `lineage.query.events.dlt`.
 
@@ -142,13 +146,24 @@ Four distinct pools, all bounded, none created per request:
   idle.
 - **`async-lineage-*`** — `AsyncConfig.getAsyncExecutor()`, core 5 / max 20 / queue 100, with
   `MdcTaskDecorator` so trace context survives the handoff.
-- **`sse-progress-*`** — one shared `ThreadPoolTaskScheduler`, pool size 4,
-  `removeOnCancelPolicy` on, shut down with the context.
+- **`sse-progress-*`** — one shared `ThreadPoolTaskScheduler`, pool size from
+  `app.sse.scheduler-pool-size` (8), `removeOnCancelPolicy` on, shut down with the context.
 
 The SSE scheduler exists because the streaming endpoint used to call
 `Executors.newSingleThreadExecutor()` per request and never shut it down — an unbounded thread
 allocation on a path whose call rate is chosen by clients. If you add another async path, use
 an existing pool or add a managed bean. Do not allocate an executor inside a request method.
+
+The pool is bounded and so, now, is what feeds it. It was fixed at 4 while the number of open
+streams was set by client demand alone, which is a bounded queue in front of an unbounded input:
+nothing errors, the polls just fall behind, and the two-second interval the endpoint advertises
+quietly stops being true for everyone connected. `SseStreamGate` caps concurrent streams
+(`app.sse.max-concurrent-streams`, 200) and answers 503 with `Retry-After` beyond it, and exports
+`lineage.sse.streams.active` so saturation is a number rather than an inference from latency. The
+underlying design is still a poll wearing an event-stream costume — the phase transitions exist
+as Kafka events, but fanning them out to an arbitrary API pod per connection is a larger piece of
+architecture than this endpoint has earned. The reads are cheap because in-flight tasks come from
+the Redis state cache.
 
 The SSE scheduler has no `MdcTaskDecorator`, and that is not an oversight:
 `ThreadPoolTaskScheduler.setTaskDecorator` landed in Spring Framework 6.2 and this is Boot
@@ -188,19 +203,33 @@ an identity belonging to nobody.
 
 `TcknAttributeConverter` sits on the JPA attribute, so encryption happens on the way to the
 database and nowhere else in the code has to remember. `VaultTransitTcknEncryptionService`
-prefers Vault Transit (`vault:v1:` prefix) and falls back to local AES-256-GCM envelope
-encryption (`enc:v1:gcm:`) when Vault is off or unreachable.
+prefers Vault Transit (`vault:v1:` prefix) and falls back to local AES-256-GCM
+(`enc:v2:<keyId>:`) when Vault is off or unreachable. Not envelope encryption, which the
+comments here used to call it — there is no data key and no wrapping. Keys are derived with
+PBKDF2-HMAC-SHA256 once per key id at startup (`TcknEncryptionKeyring`), and because the key id
+travels inside the ciphertext, rotating is a config change rather than an act of data loss.
 
 `decrypt` throws rather than returning its argument. It used to swallow the failure and return
 the ciphertext, so during a Vault outage callers received an encrypted blob and treated it as a
 citizen's national ID — storing, logging and comparing it as one, with no exception anywhere.
-Every terminal path now either returns real plaintext or throws.
+Every terminal path now either returns real plaintext or throws. The single exception is a bare
+11-digit value, which is what a pre-encryption row looks like; that is logged at WARN.
+
+**Decryption on load is why the read path matters.** Anything that serialises an entity with a
+converted TCKN field emits plaintext. `LineageAuditAdminController` did, over the whole table at
+once. Entities carry `@JsonIgnore` on `nationalId` as a backstop and the audit API projects to a
+masked DTO; see `docs/SECURITY_ARCHITECTURE_NOTES.md`.
 
 ## Resilience
 
 `LegacyCensusGraphClientImpl` is behind a Resilience4j circuit breaker
-(`legacyCensusBackend`, 10-call window, 50% failure threshold, 10s open) with a fallback, plus
-`@Retry`. Ingress is rate limited to 10 requests per minute per client key.
+(`legacyCensusBackend`, 10-call window, 50% failure threshold, 10s open) and **no fallback** —
+the one it had invented ancestry the pipeline then certified — plus `@Retry`, which is now
+actually configured (`resilience4j.retry.instances.legacyCensusBackend`: 2 attempts, exponential,
+ignoring `CallNotPermittedException`). It ran on library defaults before, and multiplied by the
+pipeline's own re-queue loop that was up to twelve calls per task into a failing backend with no
+delay between them. `PipelineRetryProperties` writes the product down and bounds it at six.
+Ingress is rate limited to 10 requests per minute per client key.
 
 That limit is counted in Redis (`ratelimit:lineage:ingress:{clientKey}`, atomic INCR/PEXPIRE),
 not in the JVM, so it does not multiply by the replica count. See `docs/CONFIGURATION.md` for

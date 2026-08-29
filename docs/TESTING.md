@@ -13,7 +13,12 @@ mvn verify                # adds the Testcontainers suite (needs Docker)
 | Class | Kind | What it actually proves |
 |---|---|---|
 | `SecurityFilterChainTest` | `@SpringBootTest` + MockMvc, **real filter chain** | Tokens validated, roles enforced, actuator locked down, rate limiting wired into the authenticated path |
-| `TcknEncryptionServiceTest` | plain unit | Encrypt/decrypt/mask round trips, and that decrypt fails loudly instead of returning ciphertext |
+| `TcknEncryptionServiceTest` | plain unit | Encrypt/decrypt/mask round trips; key rotation across key ids; that a legacy `enc:v1` row is still readable; that decrypt fails loudly instead of returning ciphertext or guessing at un-prefixed data |
+| `LineageAuditAdminControllerTest` | `@WebMvcTest`, filters off | The audit API masks national IDs and pages, instead of returning the entity and the whole table |
+| `LineageDocumentControllerTest` | `@WebMvcTest`, filters off | Ownership on the PII endpoint: non-owner refused, admin allowed, unfinished and unparseable results refused, ancestor IDs still masked in the rendered certificate |
+| `SecretsConfigurationGuardTest` | plain unit | Missing secrets fail production startup, not just secrets left at a known default; the key actually in use is the one checked |
+| `SseStreamGateTest` | plain unit | The concurrent-stream ceiling is exact under contention and a slot always comes back |
+| `FlywaySchemaMigrationTest` | Testcontainers, **Docker required** | Every migration applies to real PostgreSQL and the result passes `ddl-auto: validate` |
 | `LineageTerminalFailureAuditTrailTest` | `@SpringBootTest`, **real transaction manager** | The terminal FAILED status and its audit row survive the DLT rethrow |
 | `PipelineFailureHandlerTest` | Mockito | Retry-vs-terminal decision, outbox re-queue, real error code recorded |
 | `LineagePipelineOrchestratorTest` | Mockito | Locking, delegation, rethrow-or-ack decision |
@@ -53,8 +58,8 @@ see it. Write it against a real context.
 `LineageTerminalFailureAuditTrailTest` is the counterexample: real Spring context, real
 transaction manager, kill the pipeline, then assert the FAILED status and audit row are still
 there *after* the rollback. It earned its keep immediately — it caught a `REQUIRES_NEW` deadlock
-in the first attempted fix that every mock-based test in the suite was blind to. See
-[`WHAT_WAS_BROKEN.md`](WHAT_WAS_BROKEN.md) section 1.
+in the first attempted fix that every mock-based test in the suite was blind to. `PipelineFailureHandler`'s
+class comment explains the transaction boundary it is guarding.
 
 The Mockito tests stayed, rewritten to assert delegation rather than pretend persistence, with
 comments stating what they cannot see. They are fast and they cover branching logic well. Just
@@ -96,18 +101,25 @@ Asserting 200 couples the two and produces failures that teach you nothing.
 
 ## What isn't covered
 
-The SSE rework has no test. The thread leak is fixed structurally — there is no per-request
-executor left to leak — but the polling lifecycle (cancel on terminal status, on timeout, on
-client disconnect) is unverified. MockMvc async SSE testing is unpleasant, which is a reason and
-not an excuse. If you touch that endpoint, this is the gap you are working over.
+**The SSE polling lifecycle.** `SseStreamGateTest` covers admission control, and the thread leak
+is fixed structurally — there is no per-request executor left to leak — but the lifecycle itself
+(cancel on terminal status, on timeout, on client disconnect, and the stream slot coming back on
+each of those paths) is still unverified. MockMvc async SSE testing is unpleasant, which is a
+reason and not an excuse. If you touch that endpoint, this is the gap you are working over.
+
+**The pipeline retry backoff end to end.** `PipelineFailureHandlerTest` asserts the re-queued
+message carries a not-before instant, and `LineageTaskConsumer` is the thing that waits on it,
+but no test drives a real failure through outbox → Kafka → a deferred second attempt. The
+arithmetic that bounds the total load on the census backend is written down in
+`PipelineRetryProperties`; it is not proven by a test.
 
 ## Running it outside Maven
 
-If you are stuck without Maven, this works, and it is how the fixes in `WHAT_WAS_BROKEN.md` were
-verified: compile `src/main/java` and `src/test/java` with `javac` against the jars in
-`~/.m2/repository`, then drive JUnit through `junit-platform-launcher`.
+If you are stuck without Maven, this works: compile `src/main/java` and `src/test/java` with
+`javac` against the jars in `~/.m2/repository`, then drive JUnit through
+`junit-platform-launcher`.
 
-Two things will bite you.
+Three things will bite you.
 
 **Pass `-parameters`.** The Spring Boot parent POM sets it; plain `javac` does not. Without it
 Spring cannot resolve `@PathVariable` and `@RequestParam` names by reflection and every such
@@ -124,6 +136,21 @@ you accept a diagnosis from it.
 **A classpath of every jar in `~/.m2` is not this project's classpath.** It pulls in whatever
 other projects left there. In one run that meant Spring AMQP was present, Boot auto-configured a
 `RabbitHealthIndicator`, the indicator failed against a broker this stack does not run, and
-`/actuator/health` returned 503 for reasons entirely unrelated to the code under test.
+`/actuator/health` returned 503 for reasons entirely unrelated to the code under test. In
+another, two Jackson versions and a stray `jackson-module-scala` were both on the path and every
+Spring context failed to start with a module-compatibility error that has nothing to do with this
+service.
 
-Neither substitutes for `mvn verify`. Run one before you believe anything.
+Deduplicate before you conclude anything: keep one jar per artifact — the newest version, and the
+*unclassified* one, since picking `kafka-clients-<v>-test.jar` over `kafka-clients-<v>.jar`
+produces a `ClassNotFoundException` for `ConsumerRecord` that reads like a missing dependency.
+
+**Testcontainers may report no Docker even when Docker works.** A hand-built classpath can
+resolve a `docker-java` old enough that the daemon rejects its API version
+(`client version 1.32 is too old`). `DockerAvailableCondition` then *skips* the container-backed
+tests rather than failing them, so a green run here does not mean `FlywaySchemaMigrationTest` or
+`LineageMessagingTestcontainersTest` ran. Check the skip count. `LineageMessagingTestcontainersTest`
+additionally will not compile below JDK 21 — the Debezium testcontainers jar is class file
+version 65.
+
+None of this substitutes for `mvn verify`. Run one before you believe anything.

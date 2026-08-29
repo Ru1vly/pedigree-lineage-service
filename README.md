@@ -10,7 +10,8 @@ until there's a certified document to download.
 The interesting parts are the transactional outbox with log-based CDC (the application never
 publishes to a broker), the transaction boundaries around the worker pipeline, and TCKN
 encryption at rest. All three are documented, and two of them are documented because they were
-wrong once — see [`docs/WHAT_WAS_BROKEN.md`](docs/WHAT_WAS_BROKEN.md).
+wrong once — the class comments on the code involved say which parts, and why the current shape
+is the way it is.
 
 ## How it fits together
 
@@ -196,8 +197,9 @@ discover it:
 What is real: the outbox and CDC path, the transaction boundaries, retry and dead-lettering,
 per-caller rate limiting, TCKN encryption at rest, the authorization rules, and the failure
 semantics — including the fact that an unreachable census backend now fails the task loudly instead
-of completing it with placeholder ancestry. See
-[`docs/WHAT_WAS_BROKEN.md`](docs/WHAT_WAS_BROKEN.md#8) for why that last one is spelled out.
+of completing it with placeholder ancestry. `LegacyCensusGraphClientImpl`'s class comment spells
+out why that last one is called out: the fallback it replaced issued citizens official-looking
+documents containing ancestry that does not exist, and recorded them as successes.
 
 If a task sits at `SUBMITTED` and never moves, the CDC path is down, not the application.
 Nothing here publishes to Kafka — the only write is an outbox row. Check
@@ -210,9 +212,9 @@ Nothing here publishes to Kafka — the only write is an outbox row. Check
 | `POST` | `/api/v1/lineage/queries` | authenticated, rate limited 10/min per caller (counted in Redis, deployment-wide) |
 | `GET` | `/api/v1/lineage/queries/{txId}` | owner or admin |
 | `DELETE` | `/api/v1/lineage/queries/{txId}` | owner or admin |
-| `GET` | `/api/v1/lineage/queries/{txId}/stream` | owner or admin, SSE progress |
+| `GET` | `/api/v1/lineage/queries/{txId}/stream` | owner or admin, SSE progress; 503 past `app.sse.max-concurrent-streams` |
 | `GET` | `/api/v1/lineage/documents/{id}/download` | owner or admin |
-| `GET` | `/api/v1/lineage/admin/audit-logs` | **ROLE_ADMIN** |
+| `GET` | `/api/v1/lineage/admin/audit-logs` | **ROLE_ADMIN**, paged (≤200/page), national IDs masked |
 | `POST` | `/api/v1/lineage/dev/token` | open, **non-production profiles only** |
 | — | `/actuator/health`, `/info`, `/prometheus` | public |
 | — | everything else under `/actuator` | **ROLE_ADMIN** |
@@ -249,8 +251,17 @@ safe is the terminal-status check at the top of the pipeline. Contention leaves 
 uncommitted so the record is redelivered on a bounded backoff, rather than being acked and dropped.
 
 **TCKN encryption at rest.** A JPA attribute converter encrypts on the way to the database via
-Vault Transit, falling back to local AES-256-GCM envelope encryption. Decryption fails loudly
-rather than handing ciphertext back to a caller who thinks it's a national ID.
+Vault Transit, falling back to local AES-256-GCM under a key derived with PBKDF2-HMAC-SHA256.
+Ciphertext carries its key id, so rotation is a config change rather than an act of data loss.
+Decryption fails loudly rather than handing ciphertext back to a caller who thinks it's a
+national ID.
+
+The read path is part of that control, and it is the part that was missing. The converter
+decrypts on load, so any endpoint that serialises one of these entities emits plaintext — which
+is what the admin audit endpoint did, over the entire table, in one unbounded response. It is
+paged and projected through a masking DTO now, and `nationalId` is `@JsonIgnore` on the entities
+as a backstop. Encrypting the column is worth nothing against an adversary who can just ask the
+API for it.
 
 **Observability.** Micrometer with a Zipkin exporter, JSON logs carrying `traceId`, `spanId`,
 `transactionId` and `userId` across the Kafka handoff and the async executor, and custom
@@ -307,7 +318,6 @@ this one had done exactly that. `ls` is authoritative;
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Deploying or wiring an environment. Every property and env var, its default, what breaks when it's wrong. |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Something is misbehaving. Bring-up, deployment, autoscaling behaviour, symptom-to-cause failure modes. |
 | [`docs/TESTING.md`](docs/TESTING.md) | Writing or trusting a test. What each class proves, which ones can't see transaction bugs, and the setup traps. |
-| [`docs/WHAT_WAS_BROKEN.md`](docs/WHAT_WAS_BROKEN.md) | **Before reverting anything** in security, pipeline transactions or autoscaling. Seven defects, root causes, what's still unverified. |
 | [`docs/SECURITY_ARCHITECTURE_NOTES.md`](docs/SECURITY_ARCHITECTURE_NOTES.md) | TCKN encryption at rest, Vault dynamic secrets, SPIFFE/SPIRE mTLS. |
 | [`docs/ARCHITECTURE_AND_CANARY_DEPLOYMENTS.md`](docs/ARCHITECTURE_AND_CANARY_DEPLOYMENTS.md) | KEDA consumer-lag autoscaling and progressive delivery in depth. |
 | [`NOTES.md`](NOTES.md) | Deployment and scaling notes, Helm file mapping, utility commands. |

@@ -242,15 +242,31 @@ security:
   # front lets a caller choose what the audit trail says about them.
   trustForwardedHeaders: true
   oauth2:
+    # Rendered into JWT_ISSUER_URI (app.security.jwt.issuer-uri), which is the property
+    # SecurityConfig actually reads. It was previously rendered into
+    # SPRING_SECURITY_OAUTH2_ISSUER_URI, which this service never reads at all - see the comment
+    # in configmap.yaml. Setting this switches token validation to asymmetric verification against
+    # the IdP's published keys; leaving it empty falls back to the shared HS256 secret below,
+    # which SecretsConfigurationGuard refuses under the "production" profile.
     issuerUri: http://keycloak.identity.svc.cluster.local:8080/realms/e-devlet
+    jwkSetUri: ""   # wins over issuerUri when set; skips OIDC discovery
+    audience: ""    # when set, the aud claim is validated too
   jwt:
     # HS256 secret the API uses to validate inbound JWTs (see SecurityConfig /
     # SecretsConfigurationGuard). The app refuses to start under the "production" Spring
     # profile if this is left at its application.yml default - see values-prod.yaml.
     secret: "changeme-generate-a-real-256-bit-secret-per-environment"
   encryption:
-    # Fallback AES-256-GCM key used only when Vault Transit is disabled/unreachable.
+    # Local AES-256-GCM key, used when Vault Transit is disabled or unreachable. Not "envelope
+    # encryption": there is no data key and no wrapping, just AES-256-GCM under a key derived from
+    # this secret. See VaultTransitTcknEncryptionService.
     masterKey: "changeme-generate-a-real-256-bit-key-per-environment"
+    # Id the active key is written under. Ciphertext carries it (enc:v2:<keyId>:...), which is what
+    # makes rotation possible: add the new secret under a new id, point this at it, and leave the
+    # old key configured until every row written under it has been rewritten.
+    activeKeyId: "primary"
+    # PBKDF2 salt. Not secret, but must be per-environment and must never change once rows exist.
+    kdfSalt: "changeme-generate-a-per-environment-kdf-salt"
   # Secret holding JWT_HMAC_SECRET + TCKN_ENCRYPTION_MASTER_KEY (the two values above).
   # Also refused to start under the "production" profile if left unchanged.
   appSecretsName: pedigree-lineage-app-secret
@@ -266,6 +282,16 @@ security:
     databaseRole: "pedigree-db-role"
     secretName: pedigree-lineage-vault-token-secret
     existingSecret: ""
+
+# Live progress streams (SSE). Each open stream is a repeating poll on a shared, fixed-size
+# scheduler, so the two have to be sized against each other: the pool was hard-coded at 4 while
+# the number of streams was bounded only by client demand, which does not fail loudly - it just
+# stretches the advertised poll interval for everyone connected. Watch the
+# lineage_sse_streams_active gauge against maxConcurrentStreams; sustained saturation means scale
+# out, not a bigger number here. See SseProperties.
+sse:
+  maxConcurrentStreams: 200
+  schedulerPoolSize: 8
 
 # Service Mesh (Istio / Linkerd) & SPIFFE/SPIRE Pod-to-Pod mTLS Encryption
 mesh:

@@ -16,7 +16,11 @@ document.
 | `app.security.jwt.issuer-uri` | `JWT_ISSUER_URI` | empty | OIDC discovery. Also validated as the `iss` claim. |
 | `app.security.jwt.audience` | `JWT_AUDIENCE` | empty | Expected `aud`. Blank means audience is not checked. |
 | `app.security.jwt.secret` | `JWT_HMAC_SECRET` | insecure placeholder | Shared HS256 secret. **Development only.** |
-| `app.security.encryption.master-key` | `TCKN_ENCRYPTION_MASTER_KEY` | insecure placeholder | Envelope-encryption key for the AES-256-GCM fallback. |
+| `app.security.encryption.master-key` | `TCKN_ENCRYPTION_MASTER_KEY` | insecure placeholder | Secret for the local AES-256-GCM key, and the only key that reads legacy `enc:v1:gcm:` rows. **No hardcoded fallback** — absent, startup fails. |
+| `app.security.encryption.active-key-id` | `TCKN_ENCRYPTION_ACTIVE_KEY_ID` | `primary` | Key id new ciphertexts are written under. Must exist in the keyring. |
+| `app.security.encryption.keys.<id>` | — | empty | Keyring for rotation: every listed key can decrypt, `active-key-id` encrypts. |
+| `app.security.encryption.kdf.salt` | `TCKN_ENCRYPTION_KDF_SALT` | shipped placeholder | PBKDF2 salt. Not secret; must be per-environment and **must never change once rows exist**. |
+| `app.security.encryption.kdf.iterations` | `TCKN_ENCRYPTION_KDF_ITERATIONS` | `210000` | Clamped up to 100 000. Paid once per key at startup, not per row. |
 | `app.security.vault.enabled` | `VAULT_TRANSIT_ENABLED` | `true` | Whether TCKN encryption uses Vault Transit. |
 | `app.security.trust-forwarded-headers` | `APP_SECURITY_TRUST_FORWARDED_HEADERS` | `false` | Believe `X-Forwarded-For`/`X-Real-IP` when recording a caller's origin. |
 
@@ -36,12 +40,46 @@ that signs, `DevTokenController` mints with it, and anyone who reads it can forg
 any user and any role including ADMIN. That is fine on a laptop and unacceptable anywhere else,
 which is why the guard refuses to start under `production` without a provider configured.
 
-**Dead property, do not trust it:**
-`spring.security.oauth2.resourceserver.jwt.issuer-uri` (env `SPRING_SECURITY_OAUTH2_ISSUER_URI`,
-default `http://localhost:8081/realms/e-devlet`, fed by `configmap.yaml`) does nothing. A custom
-`JwtDecoder` bean overrides Boot's auto-configuration entirely, so this property has never been
-read. It is a good part of why the OIDC story used to look real to anyone reading the config.
-Use the `app.security.jwt.*` keys above. Deleting it would be an improvement.
+**A property that used to be here and is now gone:**
+`spring.security.oauth2.resourceserver.jwt.issuer-uri` (env `SPRING_SECURITY_OAUTH2_ISSUER_URI`)
+did nothing. `SecurityConfig` declares its own `JwtDecoder` bean, so Boot's resource-server
+auto-configuration backs off (`@ConditionalOnMissingBean`) and never reads that prefix — while
+`application.yml` set it to a Keycloak realm and `configmap.yaml` fed it from
+`security.oauth2.issuerUri`. Anyone reading the config, or the cluster's ConfigMap, saw a service
+apparently validating tokens against an identity provider; it was validating them with the shared
+HS256 secret. Both are removed, and the chart now renders the same value into `JWT_ISSUER_URI`
+(`app.security.jwt.issuer-uri`), which `SecurityConfig` does read — so the setting that looked
+like it worked now actually does.
+
+### Rotating the TCKN encryption key
+
+Ciphertext written by the current format carries its key id — `enc:v2:<keyId>:<payload>` — which
+is what makes this possible at all. The previous format named no key, so changing
+`TCKN_ENCRYPTION_MASTER_KEY` did not rotate anything: it orphaned every historical row, and every
+later read of one threw.
+
+1. Add the new secret under a **new** id: `app.security.encryption.keys.2026-q3`. Keep the
+   existing entry. Deploy. Nothing changes yet — the new key is only decryptable, not active.
+2. Point `active-key-id` at the new id and deploy. New writes use it; old rows still read under
+   the old key.
+3. Rewrite the old rows (load and save each affected entity so the attribute converter
+   re-encrypts it under the active key). Rows still in `enc:v1:gcm:` or in pre-encryption
+   plaintext migrate on the same pass.
+4. Only once nothing references the old id, remove its entry. A ciphertext naming a key that is
+   no longer configured fails loudly and names the missing id — it is not silently unreadable,
+   but it is unreadable.
+
+`kdf.salt` is **not** rotatable this way. It is an input to every key's derivation, so changing
+it has exactly the effect that changing the old master key had. Choose it once per environment.
+
+Two practical notes on the keyring itself. There is no single environment variable for a map, so
+`keys.<id>` is set through a values file, `SPRING_APPLICATION_JSON`, or
+`--set-string`/`-Dapp.security.encryption.keys.<id>=...`, with the secret itself coming from
+wherever your platform keeps secrets. And **use lowercase key ids** (`2026-q3`, not `2026-Q3`):
+Spring's relaxed binding canonicalises property-name segments, so an uppercase id in a properties
+file arrives lowercased, and the id is what gets written into every ciphertext. Ids are restricted
+to `[A-Za-z0-9_-]` and at most 32 characters, because they live inside the ciphertext where `:` is
+the field separator.
 
 ## Actuator
 
@@ -99,7 +137,7 @@ stay comfortably under pool size × replicas — in practice concurrency 3 again
 leaves plenty of headroom, but if you raise concurrency, check this before you find out the
 hard way.
 
-`ddl-auto: validate`. Schema changes go through Flyway (`V1`–`V4` in
+`ddl-auto: validate`. Schema changes go through Flyway (`V1`–`V5` in
 `src/main/resources/db/migration`), never through Hibernate. Debezium reads the WAL, so
 migrations that rewrite `transactional_outbox` need thinking about, not just applying.
 
@@ -138,9 +176,10 @@ running the pipeline without the lock risks two workers on one task.
 
 Dynamic database credentials on a 1 hour lease with renewal, role `pedigree-db-role`.
 `fail-fast: false`, so the application starts even when Vault is unreachable and falls back to
-envelope encryption for TCKN — but note that `decrypt` will now *throw* on ciphertext it cannot
-handle rather than quietly returning it. Loud failure during an outage is the intended
-behaviour.
+local AES-256-GCM for TCKN — but note that `decrypt` will *throw* on ciphertext it cannot handle
+rather than quietly returning it. Loud failure during an outage is the intended behaviour. The
+one value that still passes through unchanged is a bare 11-digit TCKN, which is the single shape
+a pre-encryption row can legitimately have; it is logged at WARN and rewritten on next save.
 
 The Helm chart projects the connection details as non-secret config and the token from a Secret.
 Without those, a pod falls back to `localhost:8200`, which does not exist inside a container.
@@ -167,8 +206,46 @@ must not become a service outage.
 Circuit breaker `legacyCensusBackend`: count-based window of 10, minimum 5 calls, 50% failure
 threshold, 10s open, 3 half-open trial calls, and **no fallback method**. An open circuit
 propagates so the pipeline fails the task with the real cause; a fallback here previously
-substituted invented ancestry that the pipeline then certified as a completed document. See
-[`WHAT_WAS_BROKEN.md`](WHAT_WAS_BROKEN.md#8).
+substituted invented ancestry that the pipeline then certified as a completed document.
+
+### The retry budget, multiplied out
+
+There are two retry layers around the census backend and they compose. For a long time only one
+of them was configured and nobody had multiplied them together.
+
+| Layer | Where | Setting |
+|---|---|---|
+| Census call | `@Retry` on `LegacyCensusGraphClientImpl` | `resilience4j.retry.instances.legacyCensusBackend.maxAttempts` (2), 500ms exponential |
+| Pipeline attempt | `PipelineFailureHandler` re-queue via the outbox | `app.pipeline.retry.max-retries` (2), 2s × 3 backoff capped at 10s |
+
+Worst case is therefore `(1 + max-retries) × maxAttempts` = **6 calls per task**, spread over
+seconds. It was previously twelve, essentially back-to-back: `@Retry` was named in the code but
+had no `resilience4j.retry` block, so it silently ran on the library default of 3 attempts and
+retried *everything* — including the circuit breaker's own `CallNotPermittedException`, the one
+exception where retrying is guaranteed to be useless. The pipeline layer then re-queued with no
+delay at all, because an outbox row is on Kafka within milliseconds of the commit. Both layers
+are now explicit, `CallNotPermittedException` is ignored by the retry, and a re-queued attempt
+carries a not-before instant that `LineageTaskConsumer` waits for.
+
+That wait is taken on a Kafka listener thread — there is nowhere else to take it, since the
+outbox publishes as soon as its transaction commits — and is capped by
+`app.pipeline.retry.max-consumer-deferral` (15s). A delay topic is the right answer if the budget
+ever needs to stretch past seconds.
+
+### Live progress streams
+
+| Property | Env var | Default | Notes |
+|---|---|---|---|
+| `app.sse.max-concurrent-streams` | `APP_SSE_MAX_CONCURRENT_STREAMS` | `200` | Per instance. Beyond it, `GET .../stream` answers 503 with `Retry-After`. |
+| `app.sse.scheduler-pool-size` | `APP_SSE_SCHEDULER_POOL_SIZE` | `8` | Threads shared by every open stream's poll. |
+| `app.sse.poll-interval` | `APP_SSE_POLL_INTERVAL` | `2s` | |
+
+The stream is a poll published as SSE, not a push, and the polls share one fixed-size scheduler.
+The pool was hard-coded at 4 with no limit on the number of streams feeding it, which does not
+fail loudly — the queue simply grows and the advertised interval stretches for everyone connected
+while the endpoint carries on promising two seconds. Refusing the connection that crosses the
+ceiling makes the limit visible instead. Watch the `lineage_sse_streams_active` gauge against
+`max-concurrent-streams`; sustained saturation means scale out, not a bigger number.
 
 ## Helm values worth knowing
 
@@ -194,9 +271,24 @@ Under the `production` profile, `SecretsConfigurationGuard` fails startup if:
 
 - neither `app.security.jwt.jwk-set-uri` nor `app.security.jwt.issuer-uri` is set — no external
   identity provider means symmetric HS256 validation, and that is not a production auth model;
-- `app.security.jwt.secret` is still the repo default;
-- `app.security.encryption.master-key` is still the repo default;
+- `app.security.jwt.secret` is missing, or still the repo default;
+- the encryption secret actually in use — `keys.<active-key-id>` when the keyring is configured,
+  `master-key` otherwise — is missing, or still the repo default;
+- `app.security.encryption.kdf.salt` is still the shipped default;
 - `spring.cloud.vault.token` is still `root` and Vault config is enabled.
+
+**"Missing" counts, and that is the point.** The guard used to return early unless a value
+*equalled* a known insecure default, so a blank or absent one passed silently — while
+`VaultTransitTcknEncryptionService` carried its own hardcoded fallback secret, a different
+literal from the one the guard knew about. Deleting a single line from `application.yml` therefore
+produced a production deployment that started cleanly and encrypted every citizen's TCKN under a
+key committed to this repository. Both halves are closed: absent is treated exactly like
+insecure, and the encryption service has no fallback secret at all — with no key configured it
+refuses to start.
+
+Note also that it checks the key that *encrypts*, not whichever property is readable. With a
+keyring configured, a real `master-key` alongside a defaulted `keys.<active-key-id>` is still a
+failure.
 
 Outside `production` each of these logs a warning instead. Read your startup logs on a fresh
 environment; the warnings are there to be noticed, not scrolled past.

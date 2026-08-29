@@ -18,6 +18,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 
@@ -46,6 +47,7 @@ public class PipelineFailureHandler {
     private final TransactionalOutboxRepository outboxRepository;
     private final LineageTaskStateCache stateCache;
     private final ObjectMapper objectMapper;
+    private final PipelineRetryProperties retryProperties;
 
     /**
      * Increments the task's retry count and either re-queues the message for another attempt
@@ -83,8 +85,9 @@ public class PipelineFailureHandler {
             String transactionId,
             int nextRetryCount,
             String errorMessage) {
-        log.warn("Pipeline attempt {} of {} failed for transactionId={}; re-queueing for retry. Error: {}",
-                nextRetryCount, task.getMaxRetries(), transactionId, errorMessage);
+        Duration backoff = retryProperties.backoffForAttempt(nextRetryCount);
+        log.warn("Pipeline attempt {} of {} failed for transactionId={}; re-queueing for retry in {}. Error: {}",
+                nextRetryCount, task.getMaxRetries(), transactionId, backoff, errorMessage);
         task.setStatus(TaskStatus.SUBMITTED);
         task.setCurrentPhase(ProcessingPhase.INITIATED);
         task.setProgressPercentage(0);
@@ -97,13 +100,39 @@ public class PipelineFailureHandler {
         // Re-queue via a fresh outbox row rather than publishing to Kafka directly, so the
         // retry is committed atomically with the status rollback above and survives a crash
         // between the two - the same log-based CDC guarantee the initial submission gets.
-        OutboxEvent retryEvent = OutboxEvent.builder()
+        //
+        // The outbox cannot itself delay anything: Debezium tails the insert off the WAL and the
+        // record is on Kafka in milliseconds, which is exactly what made the retry budget arrive
+        // as a burst against an already-failing backend. The attempt therefore carries the instant
+        // it may start, and LineageTaskConsumer waits for it. See PipelineRetryProperties.
+        outboxRepository.save(OutboxEvent.builder()
                 .aggregateType("LineageQueryTask")
                 .aggregateId(transactionId)
                 .eventType("LineageQueryRetryRequested")
-                .payload(toJson(message))
+                .payload(toJson(withRetrySchedule(message, nextRetryCount, backoff)))
+                .build());
+    }
+
+    /**
+     * Copies the message with its retry schedule stamped on. A copy, not a mutation: the caller's
+     * instance is the one the orchestrator is still holding for this attempt.
+     */
+    private LineageQueryMessage withRetrySchedule(LineageQueryMessage message, int retryAttempt, Duration backoff) {
+        return LineageQueryMessage.builder()
+                .transactionId(message.getTransactionId())
+                .userId(message.getUserId())
+                .nationalId(message.getNationalId())
+                .generationsDepth(message.getGenerationsDepth())
+                .includeCertificates(message.isIncludeCertificates())
+                .documentFormat(message.getDocumentFormat())
+                .idempotencyKey(message.getIdempotencyKey())
+                .traceId(message.getTraceId())
+                .submittedAt(message.getSubmittedAt())
+                .clientIpAddress(message.getClientIpAddress())
+                .clientUserAgent(message.getClientUserAgent())
+                .retryAttempt(retryAttempt)
+                .retryNotBefore(Instant.now().plus(backoff))
                 .build();
-        outboxRepository.save(retryEvent);
     }
 
     private void finalizeTerminalFailure(LineageQueryTask task, String transactionId, String errorMessage) {

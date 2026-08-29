@@ -6,8 +6,7 @@ of those are built the way they are.
 
 The ingress path is Kafka and Debezium CDC end to end. There is no AMQP broker in this stack, and
 anything in older revisions of these manifests that scaled or health-checked against RabbitMQ was
-pointing at infrastructure that does not exist - see [`WHAT_WAS_BROKEN.md`](WHAT_WAS_BROKEN.md)
-section 7.
+pointing at infrastructure that does not exist.
 
 For the runbook version of this - what to check when lag climbs and replicas do not - see
 [`OPERATIONS.md`](OPERATIONS.md).
