@@ -18,6 +18,17 @@ document.
 | `app.security.jwt.secret` | `JWT_HMAC_SECRET` | insecure placeholder | Shared HS256 secret. **Development only.** |
 | `app.security.encryption.master-key` | `TCKN_ENCRYPTION_MASTER_KEY` | insecure placeholder | Envelope-encryption key for the AES-256-GCM fallback. |
 | `app.security.vault.enabled` | `VAULT_TRANSIT_ENABLED` | `true` | Whether TCKN encryption uses Vault Transit. |
+| `app.security.trust-forwarded-headers` | `APP_SECURITY_TRUST_FORWARDED_HEADERS` | `false` | Believe `X-Forwarded-For`/`X-Real-IP` when recording a caller's origin. |
+
+**`trust-forwarded-headers` is a compliance setting, and both values are wrong somewhere.**
+`ClientOriginEnrichmentFilter` records the caller's IP and user agent onto the identity context,
+which is what `lineage_audit_logs.ip_address` is written from — on the synchronous path and, via
+the outbox message, on the worker too. Left `false`, the origin is `getRemoteAddr()`. Behind the
+nginx ingress in `helm/`, that is the ingress pod's address and the citizen's real IP appears only
+in `X-Forwarded-For`, so **that deployment must set this true**. On a directly exposed deployment
+it must stay false: the header is client-supplied, and trusting it lets a caller choose what the
+audit trail records about them. When no origin can be determined the filter records
+`UNKNOWN_ORIGIN` rather than inventing a plausible one.
 
 `jwk-set-uri` wins over `issuer-uri` when both are set. With neither, the service validates
 tokens with the shared HS256 secret, which is symmetric: the string that verifies is the string
@@ -103,7 +114,12 @@ Two uses, both with fixed key prefixes in code:
 
 - `lock:lineage:processing:{txId}` — the distributed processing lock, 10 minute TTL, released
   by a Lua compare-and-delete against a per-attempt fencing token.
-- `state:lineage:{txId}` — cached task state for fast status polling, 1 hour TTL.
+- `state:lineage:{txId}` — cached task state for fast status polling, 1 hour TTL. Written after
+  each phase transaction commits (`LineageTaskStateCache`) and read by
+  `LineageQueryService.getQueryStatus` for non-terminal tasks; terminal reads and cache misses go
+  to Postgres. Invalidated on cancel, on retry re-queue, and on dead-lettering.
+- `ratelimit:lineage:ingress:{clientKey}` — per-user ingress counter, expires with the rate limit
+  window. See "Resilience" below.
 
 Redis being down degrades differently in each case. A failed state-cache write is caught and
 logged; polling falls back to the database. A failed lock acquisition throws, and the task is
@@ -131,20 +147,28 @@ Without those, a pod falls back to `localhost:8200`, which does not exist inside
 
 ## Resilience
 
-Rate limiting: 10 requests per minute per client key, 100ms timeout, declared under
-`resilience4j.ratelimiter.configs.lineageIngress`. It must stay under `configs`, not
-`instances` — `RateLimitingFilter` builds one limiter per caller from that template via
-`registry.rateLimiter(clientKey, "lineageIngress")`, and `instances` would register a single
-eager limiter and no retrievable config.
+Rate limiting: 10 requests per minute per client key, configured under
+`app.ratelimit.lineage-ingress` (`limit-for-period`, `refresh-period`), overridable per
+environment with `APP_RATELIMIT_LIMIT_FOR_PERIOD` / `APP_RATELIMIT_REFRESH_PERIOD`.
+
+The counter lives in **Redis**, not in the JVM. `RateLimitingFilter` runs an atomic
+INCR/PEXPIRE Lua script against `ratelimit:lineage:ingress:{clientKey}`, so the configured
+limit is the limit for the whole deployment. It was previously an in-JVM Resilience4j
+`RateLimiterRegistry`, which gave every replica its own private allowance — the advertised
+10/min was really 10×N, somewhere between 20 and 120 across the 2–12 replicas KEDA scales the
+service to, depending on the current replica count and which pod the load balancer picked. The
+registry also keyed limiters by userId and never evicted them; the Redis keys expire with the
+window.
+
+If Redis is unreachable the filter **fails open** and logs at WARN. Rate limiting here protects
+the census backend from overload and is not an authorization control, so a counter-store outage
+must not become a service outage.
 
 Circuit breaker `legacyCensusBackend`: count-based window of 10, minimum 5 calls, 50% failure
-threshold, 10s open, 3 half-open trial calls, with a fallback method on the client.
-
-## Application behaviour
-
-| Property | Env var | Default | Notes |
-|---|---|---|---|
-| `app.pipeline.phase-delay-ms` | `APP_PIPELINE_PHASE_DELAY_MS` | `1500` | Simulated legacy-backend latency. Test profile uses 100. |
+threshold, 10s open, 3 half-open trial calls, and **no fallback method**. An open circuit
+propagates so the pipeline fails the task with the real cause; a fallback here previously
+substituted invented ancestry that the pipeline then certified as a completed document. See
+[`WHAT_WAS_BROKEN.md`](WHAT_WAS_BROKEN.md#8).
 
 ## Helm values worth knowing
 

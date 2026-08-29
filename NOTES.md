@@ -83,7 +83,8 @@ To ensure in-flight tasks finish gracefully when pods scale down or undergo roll
    - `spring.kafka.listener.concurrency: 3`
    - `spring.kafka.consumer.max-poll-records: 20`
    - `spring.kafka.consumer.auto-offset-reset: earliest`
-4. **Shutdown Behavior**: On `SIGTERM` the listener container stops polling and active threads get up to 60s to finish and commit offsets. A pod that dies before committing causes a group rebalance, and another consumer re-reads from the last committed offset - the record is redelivered, not lost. Delivery is therefore at-least-once, and the Redis processing lock plus the pipeline's terminal-status check are what stop a redelivered record being processed twice.
+4. **Shutdown Behavior**: On `SIGTERM` the listener container stops polling and active threads get up to 60s to finish and commit offsets. A pod that dies before committing causes a group rebalance, and another consumer re-reads from the last committed offset - the record is redelivered, not lost. Delivery is therefore at-least-once.
+5. **What makes redelivery safe**: the pipeline's **terminal-status check**, not the Redis lock. `LineagePipelinePhaseRunner.beginProcessing` refuses to re-run a task that already reached COMPLETED or FAILED, and that is the actual idempotency guard. The Redis lock is a throughput optimisation that keeps two workers off one task; correctness does not depend on holding it. Contention throws `LockContentionException` so the offset stays uncommitted and the broker redelivers on a bounded backoff - returning normally there acked the record and dropped it, which is how a task whose lock holder died could sit at PROCESSING forever. See [`docs/WHAT_WAS_BROKEN.md`](docs/WHAT_WAS_BROKEN.md#9).
 
 ---
 
@@ -96,10 +97,15 @@ To ensure in-flight tasks finish gracefully when pods scale down or undergo roll
 
 ### 2. Run KEDA Backlog Burst Simulation
 ```bash
-python3 scripts/simulate_queue_burst.py --queue-depth 50000 --target-length 1000
+python3 scripts/simulate_queue_burst.py --lag 50000 --lag-threshold 1000
+
+# Or read the real consumer-group lag instead of a supplied number:
+python3 scripts/simulate_queue_burst.py --live
 ```
-Note the simulator models the uncapped formula. Real scaling is additionally capped at the
-topic's partition count - see section 2.
+The simulator prints the uncapped formula and then the bound that actually applies: KEDA's
+`maxReplicaCount`, and the topic's partition count, which is the hard ceiling on useful
+consumers - see section 2. It warns explicitly when the computed replica count exceeds the
+partition count, because those extra pods join the group and idle.
 
 ### 3. Deploy via Helm (Prod)
 ```bash

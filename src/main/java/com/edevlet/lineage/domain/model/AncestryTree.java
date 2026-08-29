@@ -12,6 +12,16 @@ public record AncestryTree(
         String documentDownloadUrl
 ) implements Serializable {
 
+    /**
+     * Returns a copy carrying this service's real download URL for the task the tree belongs to.
+     * The census client cannot supply it - it does not know the transactionId, and it does not
+     * host the document - so it returns null and the pipeline stamps the value here once the tree
+     * is bound to a task.
+     */
+    public AncestryTree withDocumentDownloadUrl(String url) {
+        return new AncestryTree(rootPerson, generations, totalAncestorsFound, verificationSealHash, url);
+    }
+
     public record AncestorPerson(
             String nationalIdMasked,
             String firstName,

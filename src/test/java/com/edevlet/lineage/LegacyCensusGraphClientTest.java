@@ -6,6 +6,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 class LegacyCensusGraphClientTest {
@@ -30,13 +32,26 @@ class LegacyCensusGraphClientTest {
     }
 
     @Test
-    @DisplayName("fallbackAncestryTraversal - Returns degraded cached record when census graph fails")
-    void testFallbackAncestryTraversal() {
-        AncestryTree fallbackTree = client.fallbackAncestryTraversal("12345678950", 3, new RuntimeException("DB Timeout"));
+    @DisplayName("traverseAncestryGraph - A backend failure propagates instead of returning invented records")
+    void testBackendFailurePropagates() {
+        // The client used to answer an unreachable backend with a fabricated "DEGRADED_MODE" tree.
+        // Nothing downstream could tell that apart from a real answer, so the pipeline marked the
+        // task COMPLETED and the document endpoint rendered those invented ancestors as a certified
+        // pedigree document. Failing loudly is the whole point - the caller has to be told.
+        RuntimeException thrown = assertThrows(RuntimeException.class,
+                () -> client.traverseAncestryGraph("99999999999", 3));
 
-        assertNotNull(fallbackTree);
-        assertEquals("CITIZEN", fallbackTree.rootPerson().firstName());
-        assertEquals("DEGRADED_MODE", fallbackTree.rootPerson().status());
-        assertEquals("SHA256-DEGRADED-SEAL", fallbackTree.verificationSealHash());
+        assertTrue(thrown.getMessage().contains("timeout"),
+                "the real cause must survive, not be swallowed into a degraded result");
+    }
+
+    @Test
+    @DisplayName("No fallback method exists on the client for the circuit breaker to resolve")
+    void testNoFallbackMethodExists() {
+        // @CircuitBreaker resolves fallbacks reflectively by name, so a re-added method would wire
+        // itself back up silently. This asserts the absence structurally rather than by convention.
+        assertTrue(Arrays.stream(LegacyCensusGraphClientImpl.class.getDeclaredMethods())
+                        .noneMatch(method -> method.getName().toLowerCase().contains("fallback")),
+                "a fallback that substitutes ancestry must not be reintroduced");
     }
 }

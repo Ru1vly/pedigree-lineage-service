@@ -82,7 +82,6 @@ worker:
     springKafkaListenerConcurrency: "3"
     springKafkaMaxPollRecords: "20"
     springLifecycleTimeoutPerShutdownPhase: "60s"
-    phaseDelayMs: "1500"
 
 # KEDA (Kubernetes Event-driven Autoscaling) Configuration
 # Scales worker pods on Kafka consumer-group lag for the Debezium-routed outbox topic, which is
@@ -236,6 +235,12 @@ redis:
   existingSecret: ""
 
 security:
+  # True because api.ingress.enabled is true: traffic arrives through the nginx ingress, which
+  # sets X-Forwarded-For, and getRemoteAddr() would otherwise record the ingress pod in every
+  # compliance audit row instead of the citizen. Set this false for any deployment that exposes
+  # the service directly - the header is client-supplied, and believing it without a proxy in
+  # front lets a caller choose what the audit trail says about them.
+  trustForwardedHeaders: true
   oauth2:
     issuerUri: http://keycloak.identity.svc.cluster.local:8080/realms/e-devlet
   jwt:

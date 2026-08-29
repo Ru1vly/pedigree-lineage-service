@@ -3,6 +3,7 @@ package com.edevlet.lineage.infrastructure.client;
 import com.edevlet.lineage.domain.model.AncestryTree;
 import com.edevlet.lineage.domain.model.AncestryTree.AncestorPerson;
 import com.edevlet.lineage.domain.model.AncestryTree.GenerationNode;
+import com.edevlet.lineage.infrastructure.util.NationalIdMasker;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.retry.annotation.Retry;
 import lombok.extern.slf4j.Slf4j;
@@ -12,12 +13,30 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * Simulated stand-in for the legacy census/family-registry graph backend. It returns a single fixed
+ * family regardless of the national ID it is given - see the README's "What is simulated" section.
+ * The circuit breaker, retry and failure semantics around it are real; the records are not.
+ *
+ * <p>There is deliberately NO fallback method. A fallback here returned an invented tree
+ * ("CITIZEN RECORD" / "UNKNOWN" / a "SHA256-DEGRADED-SEAL" literal), and because nothing downstream
+ * could distinguish it from a real answer the pipeline stamped the task COMPLETED and the document
+ * endpoint rendered those fabricated ancestors under a footer citing Law No. 5070 on secure
+ * electronic signatures. During a backend outage the service issued citizens official-looking
+ * pedigree documents containing ancestry that does not exist, and recorded them as successes.
+ *
+ * <p>An open circuit now propagates. The orchestrator catches it, PipelineFailureHandler retries and
+ * then records a terminal FAILED with the real cause plus its compliance audit row, and the record
+ * reaches the dead-letter topic. That machinery already existed; the fallback was routing around it.
+ * A backend outage is a real event and the caller has to be told, exactly as with the Vault decrypt
+ * path - see docs/WHAT_WAS_BROKEN.md section 5 for the same argument applied there.
+ */
 @Slf4j
 @Component
 public class LegacyCensusGraphClientImpl implements LegacyCensusGraphClient {
 
     @Override
-    @CircuitBreaker(name = "legacyCensusBackend", fallbackMethod = "fallbackAncestryTraversal")
+    @CircuitBreaker(name = "legacyCensusBackend")
     @Retry(name = "legacyCensusBackend")
     public AncestryTree traverseAncestryGraph(String nationalId, int depth) {
         log.info("Querying legacy census graph database for nationalId={}, depth={}", maskNationalId(nationalId), depth);
@@ -56,31 +75,16 @@ public class LegacyCensusGraphClientImpl implements LegacyCensusGraphClient {
             )));
         }
 
-        return new AncestryTree(root, generations, 5, "SHA256-CONFIRMED-SEAL-9021A", "/api/v1/lineage/documents/sample/download");
-    }
-
-    public AncestryTree fallbackAncestryTraversal(String nationalId, int depth, Throwable cause) {
-        log.warn("Resilience4j CircuitBreaker fallback triggered for nationalId={}. Cause: {}", maskNationalId(nationalId), cause.getMessage());
-
-        AncestorPerson root = new AncestorPerson(
-                maskNationalId(nationalId),
-                "CITIZEN",
-                "RECORD",
-                "UNKNOWN",
-                "UNKNOWN",
-                LocalDate.of(1985, 1, 1),
-                "UNKNOWN",
-                "DEGRADED_MODE",
-                "KENDİSİ"
-        );
-
-        return new AncestryTree(root, List.of(), 0, "SHA256-DEGRADED-SEAL", null);
+        // documentDownloadUrl is left null on purpose. The census backend is an upstream record
+        // source; it does not host this service's documents and cannot know a task's download URL.
+        // It previously returned the literal "/api/v1/lineage/documents/sample/download", so every
+        // stored result payload pointed at a sample document rather than at its own - a link that
+        // resolves for every citizen to the same wrong file. LineagePipelinePhaseRunner stamps the
+        // real per-transaction URL onto the tree once it knows the transactionId.
+        return new AncestryTree(root, generations, 5, "SHA256-CONFIRMED-SEAL-9021A", null);
     }
 
     private String maskNationalId(String nationalId) {
-        if (nationalId == null || nationalId.length() < 11) {
-            return "123*****901";
-        }
-        return nationalId.substring(0, 3) + "*****" + nationalId.substring(8);
+        return NationalIdMasker.mask(nationalId);
     }
 }

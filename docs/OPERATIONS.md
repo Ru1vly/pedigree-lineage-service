@@ -113,8 +113,10 @@ assuming it's fine.
 the task row and the audit row's `details` both carry the actual cause. Retries were exhausted
 first — `retry_count` against `max_retries` tells you how many attempts it took.
 
-**Nothing processes and the logs mention locks.** Redis. A failed lock acquisition is treated as
-a pipeline failure by design, because running without the lock risks two workers on one task.
+**Nothing processes and the logs mention locks.** Redis. A failed lock acquisition throws
+`LockContentionException`, which leaves the Kafka offset uncommitted so the record is redelivered on
+a bounded backoff (4 attempts, 2s apart) rather than dead-lettered or silently acked. It is not
+counted as a pipeline failure and does not touch the task's retry count.
 Locks are `lock:lineage:processing:{txId}` with a 10 minute TTL and self-expire; they are
 released with a compare-and-delete against a per-attempt token, so a slow worker cannot delete
 someone else's.

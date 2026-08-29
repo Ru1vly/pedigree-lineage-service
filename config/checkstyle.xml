@@ -1,0 +1,90 @@
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC
+        "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+        "https://checkstyle.org/dtds/configuration_1_3.dtd">
+
+<!--
+  A deliberately narrow ruleset.
+
+  The point of running Checkstyle in CI is to catch defects, not to relitigate formatting. A
+  full Sun or Google ruleset on this codebase would emit thousands of violations on day one,
+  which teaches everyone to pass -Dcheckstyle.skip and buys nothing. Every check below either
+  catches a real bug class (empty catch, fallthrough, a mismatched equals/hashCode pair) or
+  enforces something this codebase already does consistently.
+
+  Add rules as the team agrees to them. Do not lower violationSeverity to make a build pass.
+-->
+<module name="Checker">
+    <property name="severity" value="error"/>
+    <property name="fileExtensions" value="java"/>
+
+    <!-- Tabs render differently everywhere; this codebase is spaces throughout. -->
+    <module name="FileTabCharacter">
+        <property name="eachLine" value="true"/>
+    </module>
+
+    <!--
+      There is deliberately no LineLength rule. This ruleset is about defects, not formatting, and
+      a line-length gate on an existing codebase either forces an unrelated reformatting diff or
+      gets set so high it never fires. Add one when the team agrees a number, together with the
+      reformat.
+    -->
+
+    <module name="SuppressionFilter">
+        <property name="file" value="${checkstyle.suppressions.file}"/>
+    </module>
+
+    <module name="TreeWalker">
+        <!-- Real bug classes. -->
+
+        <!-- A swallowed exception is how failures become silent. -->
+        <module name="EmptyCatchBlock">
+            <property name="exceptionVariableName" value="ignored|expected"/>
+        </module>
+
+        <!-- Unintentional switch fallthrough. -->
+        <module name="FallThrough"/>
+
+        <!-- equals() without hashCode() breaks every hash-based collection. -->
+        <module name="EqualsHashCode"/>
+
+        <!-- "literal".equals(x) is NPE-safe; x.equals("literal") is not. -->
+        <module name="EqualsAvoidNull"/>
+
+        <!-- if (x) doSomething(); silently detaches the next line during an edit. -->
+        <module name="NeedBraces"/>
+
+        <!-- Assignment inside a subexpression is nearly always a typo for ==. -->
+        <module name="InnerAssignment"/>
+
+        <!-- Overloads separated by other members read as unrelated methods. -->
+        <module name="OverloadMethodsDeclarationOrder"/>
+
+        <!-- Two statements on one line hide one of them. -->
+        <module name="OneStatementPerLine"/>
+
+        <!-- Catching or throwing bare Throwable swallows Errors the JVM needs to propagate. -->
+        <module name="IllegalCatch">
+            <property name="illegalClassNames" value="java.lang.Throwable, java.lang.Error"/>
+        </module>
+        <module name="IllegalThrows"/>
+
+        <!-- A default label that is not last reads as unreachable. -->
+        <module name="DefaultComesLast"/>
+
+        <!-- Modifying a parameter makes the caller's value and the local diverge silently. -->
+        <module name="ModifiedControlVariable"/>
+
+        <!-- String literals compared with == compare identity, not content. -->
+        <module name="StringLiteralEquality"/>
+
+        <!-- Hygiene the codebase already follows. -->
+        <module name="UnusedImports">
+            <property name="processJavadoc" value="true"/>
+        </module>
+        <module name="RedundantImport"/>
+        <module name="UpperEll"/>
+        <module name="ArrayTypeStyle"/>
+        <module name="MissingOverride"/>
+    </module>
+</module>

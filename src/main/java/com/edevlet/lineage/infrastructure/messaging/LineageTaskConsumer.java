@@ -45,15 +45,27 @@ public class LineageTaskConsumer {
         MDC.put(TracingMdcFilter.MDC_TRANSACTION_ID, message.getTransactionId());
         MDC.put(TracingMdcFilter.MDC_USER_ID, message.getUserId());
 
+        // The submitter's origin IP and user agent travel with the message so audit rows written on
+        // this worker attribute the action to the citizen who made the request, not to the worker
+        // that happened to process it. Messages enqueued before those fields existed carry null;
+        // an explicit unknown marker is recorded rather than a plausible-looking invented value.
         NationalIdentityContext workerContext = new NationalIdentityContext(
                 message.getUserId(),
                 message.getNationalId(),
                 Set.of("ROLE_USER"),
                 Set.of("lineage:read"),
-                "SYSTEM_KAFKA_WORKER",
-                "SpringKafkaWorker/1.0"
+                originOrUnknown(message.getClientIpAddress()),
+                originOrUnknown(message.getClientUserAgent())
         );
         UserSecurityContextHolder.setContext(workerContext);
+    }
+
+    /**
+     * An audit trail that says "unknown" is auditable; one that says "SYSTEM_KAFKA_WORKER" for a
+     * citizen's request is a wrong answer that reads like a right one.
+     */
+    private static String originOrUnknown(String value) {
+        return value != null && !value.isBlank() ? value : "UNKNOWN_ORIGIN";
     }
 
     private void cleanupExecutionContext() {
@@ -61,12 +73,31 @@ public class LineageTaskConsumer {
         MDC.clear();
     }
 
+    /**
+     * Runs on {@code dltKafkaListenerContainerFactory}, NOT the main factory. The main factory's
+     * error handler republishes failures to this very topic, so hosting this listener there turned
+     * any unparseable dead-lettered payload into a hot infinite loop - read, fail to parse,
+     * republish to the DLT, read again - at {@code FixedBackOff(0, 0)}. See KafkaConfig.
+     *
+     * <p>The parse is also handled here rather than thrown: a malformed payload on the DLT carries
+     * no transactionId to act on, so there is no task to finalize and nothing an operator gains
+     * from a stack trace on every redelivery. It is logged with the raw payload once and the offset
+     * moves on.
+     */
     @KafkaListener(
             topics = KafkaConfig.TOPIC_LINEAGE_QUERY_EVENTS_DLT,
             groupId = KafkaConfig.DLT_CONSUMER_GROUP,
-            containerFactory = "kafkaListenerContainerFactory")
-    public void consumeDeadLetteredTask(String payload) throws JsonProcessingException {
-        LineageQueryMessage message = objectMapper.readValue(payload, LineageQueryMessage.class);
+            containerFactory = "dltKafkaListenerContainerFactory")
+    public void consumeDeadLetteredTask(String payload) {
+        LineageQueryMessage message;
+        try {
+            message = objectMapper.readValue(payload, LineageQueryMessage.class);
+        } catch (JsonProcessingException parseFailure) {
+            log.error("CRITICAL: Unparseable payload on the Dead Letter Topic; it names no task to "
+                    + "finalize and is being skipped. Raw payload: {}", payload, parseFailure);
+            return;
+        }
+
         log.error("CRITICAL: Message received in Dead Letter Topic (DLT). Task transactionId={}, userId={}. Manual intervention required.",
                 message.getTransactionId(), message.getUserId());
         pipelineOrchestrator.finalizeFailure(message.getTransactionId(), "MAX_RETRIES_EXCEEDED_DLQ", "Task moved to Dead Letter Topic after processing failures.");

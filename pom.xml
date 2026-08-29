@@ -24,6 +24,15 @@
         <debezium.version>3.6.0.Final</debezium.version>
         <testcontainers.version>1.21.2</testcontainers.version>
         <logstash-logback.version>7.4</logstash-logback.version>
+        <jacoco.version>0.8.12</jacoco.version>
+        <checkstyle.plugin.version>3.6.0</checkstyle.plugin.version>
+        <checkstyle.version>10.20.1</checkstyle.version>
+        <!--
+          Ratchet, not aspiration. See the jacoco-maven-plugin comment in <build>. Measured at
+          0.70 on a run with no Docker available (which skips the Testcontainers tests); 0.65
+          leaves headroom for that path while still failing on a real regression.
+        -->
+        <jacoco.line.coverage.minimum>0.65</jacoco.line.coverage.minimum>
     </properties>
 
     <dependencies>
@@ -200,6 +209,90 @@
 
     <build>
         <plugins>
+            <!--
+              Coverage. The report is produced on every `mvn test`; `jacoco:check` runs in `verify`
+              and fails the build below the ratios in the rule. The bounds are set just under what
+              the suite currently achieves - they are a ratchet against regression, not an
+              aspiration. Raise them as coverage improves; never lower them to make a build pass.
+            -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco.version}</version>
+                <executions>
+                    <execution>
+                        <id>prepare-agent</id>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>check-coverage</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <rule>
+                                    <element>BUNDLE</element>
+                                    <limits>
+                                        <limit>
+                                            <counter>LINE</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>${jacoco.line.coverage.minimum}</minimum>
+                                        </limit>
+                                    </limits>
+                                </rule>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+              Style and correctness-adjacent static checks. The ruleset in config/checkstyle.xml is
+              deliberately narrow: checks that catch real defects (empty catch blocks, fallthrough,
+              equals/hashCode pairs) rather than formatting opinions, so it can run at
+              failOnViolation without becoming noise the team learns to ignore.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-checkstyle-plugin</artifactId>
+                <version>${checkstyle.plugin.version}</version>
+                <dependencies>
+                    <dependency>
+                        <groupId>com.puppycrawl.tools</groupId>
+                        <artifactId>checkstyle</artifactId>
+                        <version>${checkstyle.version}</version>
+                    </dependency>
+                </dependencies>
+                <configuration>
+                    <configLocation>config/checkstyle.xml</configLocation>
+                    <propertyExpansion>checkstyle.suppressions.file=${project.basedir}/config/checkstyle-suppressions.xml</propertyExpansion>
+                    <consoleOutput>true</consoleOutput>
+                    <failOnViolation>true</failOnViolation>
+                    <violationSeverity>error</violationSeverity>
+                    <includeTestSourceDirectory>true</includeTestSourceDirectory>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>checkstyle-validate</id>
+                        <phase>validate</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>

@@ -1,0 +1,14 @@
+# Keep the build context to what the image actually needs. target/ in particular can carry a
+# stale jar from a host build into the image layer cache.
+target/
+.git/
+.github/
+.claude/
+docs/
+helm/
+argocd/
+flux/
+debezium/
+scripts/
+*.md
+docker-compose.yml

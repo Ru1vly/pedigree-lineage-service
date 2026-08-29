@@ -16,6 +16,16 @@ spring:
       hibernate:
         dialect: org.hibernate.dialect.H2Dialect
 
+  # Flyway is off in THIS profile only, and that is now a deliberate split rather than a gap.
+  # These are the fast unit slices: H2, no containers, Hibernate builds the schema. The migrations
+  # cannot run here anyway - they are PostgreSQL DDL, and production runs them with
+  # ddl-auto: validate, which is a different contract from ddl-auto: update on H2.
+  #
+  # V1-V4 are exercised for real by FlywaySchemaMigrationTest, which starts PostgreSQL via
+  # Testcontainers, applies every migration, and boots under ddl-auto: validate - production's
+  # actual contract. Before that test existed the migrations were never executed by `mvn test`
+  # at all, so a migration that failed to apply, or that drifted from the entity mappings, would
+  # first have been discovered on a deployment.
   flyway:
     enabled: false
 
@@ -40,8 +50,6 @@ app:
       # this only stops the listener container's background consumer thread from repeatedly
       # retrying against a Kafka broker that was never started in this H2/mocked-Redis profile.
       auto-startup: false
-  pipeline:
-    phase-delay-ms: 100
   security:
     jwt:
       secret: test-only-hmac-secret-not-for-production-use-32-bytes-minimum

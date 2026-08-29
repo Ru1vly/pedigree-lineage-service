@@ -10,6 +10,7 @@ import com.edevlet.lineage.domain.repository.TransactionalOutboxRepository;
 import com.edevlet.lineage.dto.LineageQueryAcceptedResponse;
 import com.edevlet.lineage.dto.LineageQueryRequest;
 import com.edevlet.lineage.dto.LineageQueryStatusResponse;
+import com.edevlet.lineage.infrastructure.cache.LineageTaskStateCache;
 import com.edevlet.lineage.infrastructure.messaging.LineageQueryMessage;
 import com.edevlet.lineage.infrastructure.util.UuidV7Generator;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -17,6 +18,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -31,6 +33,7 @@ public class LineageQueryService {
     private final LineageQueryRepository queryRepository;
     private final TransactionalOutboxRepository outboxRepository;
     private final LineageAuditLogRepository auditLogRepository;
+    private final LineageTaskStateCache stateCache;
     private final ObjectMapper objectMapper;
 
     @Transactional
@@ -50,7 +53,24 @@ public class LineageQueryService {
         String traceId = MDC.get("traceId");
 
         LineageQueryTask task = buildInitialTask(request, identity, transactionId, traceId);
-        queryRepository.save(task);
+
+        // The lookup above is a fast path, not a guarantee: two concurrent submits carrying the
+        // same (userId, idempotencyKey) both miss it and both insert. The unique index from V3 is
+        // the actual arbiter, and it fires on flush. saveAndFlush forces that flush here, inside a
+        // frame that can name what happened - otherwise the violation surfaced at commit, after
+        // this method had returned, and reached the client as an unhandled 500 from
+        // GlobalExceptionHandler's catch-all. DuplicateRequestException is the answer this service
+        // already defines and already maps to 409; it simply was never thrown.
+        try {
+            queryRepository.saveAndFlush(task);
+        } catch (DataIntegrityViolationException concurrentDuplicate) {
+            log.info("Concurrent duplicate submit for userId={}, idempotencyKey={}; the competing request won the insert.",
+                    identity.userId(), request.getIdempotencyKey());
+            // This transaction is already poisoned by the failed insert, so the winner's
+            // transactionId cannot be read back from here. Retrying the request is the client's
+            // route to it: the idempotency lookup above will match by then and return 202.
+            throw new DuplicateRequestException(request.getIdempotencyKey(), null);
+        }
 
         LineageQueryMessage message = buildQueryMessage(request, identity, transactionId, traceId);
 
@@ -78,8 +98,25 @@ public class LineageQueryService {
         return buildAcceptedResponse(task);
     }
 
+    /**
+     * Status polling. Serves in-flight tasks from the Redis state cache and everything else from
+     * Postgres.
+     *
+     * <p>The cache is only consulted for non-terminal tasks. That is the hot path - the SSE stream
+     * polls this method on a fixed interval for the life of a query, and it is what the cache was
+     * built for - while a COMPLETED task needs its ancestry result, which the cache deliberately
+     * does not carry, and a FAILED one is read rarely. The ownership check runs identically on both
+     * paths: a cache read that skipped it would be a way to read another citizen's task.
+     */
     @Transactional(readOnly = true)
     public LineageQueryStatusResponse getQueryStatus(String transactionId, NationalIdentityContext identity) {
+        Optional<LineageTaskStateCache.CachedTaskState> cachedState = stateCache.read(transactionId);
+        if (cachedState.isPresent() && !cachedState.get().status().isTerminal()) {
+            LineageTaskStateCache.CachedTaskState state = cachedState.get();
+            validateCachedOwnership(state, identity, transactionId);
+            return buildStatusResponseFromCache(state);
+        }
+
         LineageQueryTask task = queryRepository.findByTransactionId(transactionId)
                 .orElseThrow(() -> new LineageNotFoundException(transactionId));
 
@@ -124,6 +161,11 @@ public class LineageQueryService {
         task.setUpdatedAt(Instant.now());
         queryRepository.save(task);
 
+        // The cached entry still says PROCESSING. Polling trusts the cache for non-terminal states,
+        // so leaving it would report a cancelled task as still running until the TTL expired.
+        // Evicting is enough: the next read misses and falls through to Postgres.
+        stateCache.evict(transactionId);
+
         LineageAuditLog auditLog = LineageAuditLog.builder()
                 .transactionId(transactionId)
                 .userId(identity.userId())
@@ -134,6 +176,35 @@ public class LineageQueryService {
                 .details("Cancelled lineage query transaction")
                 .build();
         auditLogRepository.save(auditLog);
+    }
+
+    private LineageQueryStatusResponse buildStatusResponseFromCache(LineageTaskStateCache.CachedTaskState state) {
+        String phaseDescription = state.currentPhase() != null ? state.currentPhase().getDescription() : "";
+        return LineageQueryStatusResponse.builder()
+                .transactionId(state.transactionId())
+                .status(state.status())
+                .currentPhase(state.currentPhase())
+                .phaseDescription(phaseDescription)
+                .progressPercentage(state.progressPercentage())
+                .retryAfterSeconds(calculateRetryAfter(state.status()))
+                .createdAt(state.createdAt())
+                .updatedAt(state.updatedAt())
+                .completedAt(state.completedAt())
+                // Never populated on this path: the cache holds no result payload, and it is only
+                // consulted for non-terminal tasks, which have no result to return.
+                .result(null)
+                .resultDownloadUrl(state.resultDownloadUrl())
+                .errorCode(state.errorCode())
+                .errorMessage(state.errorMessage())
+                .build();
+    }
+
+    private void validateCachedOwnership(
+            LineageTaskStateCache.CachedTaskState state, NationalIdentityContext identity, String transactionId) {
+        if (!state.userId().equals(identity.userId()) && !identity.isAdmin()) {
+            log.warn("Unauthorized access attempt on transactionId={} by userId={}", transactionId, identity.userId());
+            throw new UnauthorizedTaskAccessException(identity.userId(), transactionId);
+        }
     }
 
     private void validateTaskOwnership(LineageQueryTask task, NationalIdentityContext identity, String transactionId) {
@@ -193,6 +264,10 @@ public class LineageQueryService {
                 .documentFormat(request.getDocumentFormat())
                 .idempotencyKey(request.getIdempotencyKey())
                 .traceId(traceId)
+                // Carried across the outbox so the worker's audit rows can name the citizen's
+                // origin rather than the worker that processed the task - see LineageTaskConsumer.
+                .clientIpAddress(identity.ipAddress())
+                .clientUserAgent(identity.userAgent())
                 .submittedAt(Instant.now())
                 .build();
     }

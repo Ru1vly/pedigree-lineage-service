@@ -19,10 +19,6 @@ and where to look.
 detect transaction bugs, and the setup traps (Redis bean-name collisions, `-parameters`, slice
 dependencies) that will otherwise cost you an afternoon.
 
-**[WHAT_WAS_BROKEN.md](WHAT_WAS_BROKEN.md)** — the seven defects fixed in the security,
-transaction and autoscaling rework. Root cause for each, why the obvious fix was wrong for two
-of them, and what remains unverified. Read before reverting any of it.
-
 **[SECURITY_ARCHITECTURE_NOTES.md](SECURITY_ARCHITECTURE_NOTES.md)** — field-level TCKN
 encryption, Vault dynamic secrets, SPIFFE/SPIRE mTLS.
 

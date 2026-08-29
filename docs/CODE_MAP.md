@@ -75,11 +75,21 @@ still matches. The Lua matters: a worker that overruns the TTL would otherwise d
 *second* worker's lock on its way out, and you'd have two workers on one task believing they
 were each alone.
 
-**6. `LineagePipelinePhaseRunner.runPhases`** is the transaction. It reloads the task, skips it
-if already terminal, then walks three phases (ancestry traversal, identity verification,
-document generation), writing progress to the database and mirroring it into Redis
-(`state:lineage:{txId}`, 1 hour TTL) so status polling doesn't hammer Postgres. On success it
-writes a `LINEAGE_QUERY_COMPLETED` audit row.
+**6. `LineagePipelinePhaseRunner`** holds the transactions — one per phase, not one for the
+whole run. `beginProcessing` reloads the task and skips it if already terminal (10%), then
+`verifyIdentityRecords` (35%), `generateDocuments` (70%) and `completeWithAncestry` (100%) each
+commit on their own, sequenced by the orchestrator.
+
+That split is what makes the intermediate progress real. Phases 2 and 3 previously shared a
+transaction with the completion write, so 35 and 70 were overwritten by 100 before anything was
+committed and no poller could observe either — the SSE stream could only ever emit 0 → 10 → 100.
+
+Each committed transition is mirrored into Redis via `LineageTaskStateCache`
+(`state:lineage:{txId}`, 1 hour TTL) **after commit**, so the cache can never advertise progress
+a rollback erased. `LineageQueryService.getQueryStatus` reads that cache for non-terminal tasks —
+the hot polling path — and falls through to Postgres on a miss or for a terminal task, which
+needs the ancestry result the cache deliberately does not carry. The ownership check runs on both
+paths. On success the runner writes a `LINEAGE_QUERY_COMPLETED` audit row.
 
 **7. Failure** unwinds to the orchestrator, outside any transaction, which calls
 `PipelineFailureHandler.recordFailureAndMaybeRetry`. Under `maxRetries` it flips the task back
@@ -192,12 +202,9 @@ Every terminal path now either returns real plaintext or throws.
 (`legacyCensusBackend`, 10-call window, 50% failure threshold, 10s open) with a fallback, plus
 `@Retry`. Ingress is rate limited to 10 requests per minute per client key.
 
-One configuration trap, already commented in `application.yml` but worth repeating: the rate
-limiter is declared under `resilience4j.ratelimiter.configs`, not `instances`.
-`RateLimitingFilter` calls `registry.rateLimiter(clientKey, "lineageIngress")` to build one
-limiter *per caller* from a shared template. Declaring it under `instances` creates a single
-eager limiter named `lineageIngress` and registers no retrievable config, so every caller would
-share one bucket — or the lookup fails outright.
+That limit is counted in Redis (`ratelimit:lineage:ingress:{clientKey}`, atomic INCR/PEXPIRE),
+not in the JVM, so it does not multiply by the replica count. See `docs/CONFIGURATION.md` for
+the configuration keys and the fail-open behaviour when Redis is down.
 
 Kafka-level retry is `FixedBackOff(0, 0)`: straight to the DLT on first failure. That is
 correct here and not a missing configuration. Retries are the application's job, via the outbox

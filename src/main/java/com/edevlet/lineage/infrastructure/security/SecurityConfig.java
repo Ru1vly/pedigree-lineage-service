@@ -2,9 +2,9 @@ package com.edevlet.lineage.infrastructure.security;
 
 import com.edevlet.lineage.infrastructure.ratelimit.RateLimitingFilter;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.resilience4j.ratelimiter.RateLimiterRegistry;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
@@ -28,6 +28,7 @@ import org.springframework.util.StringUtils;
 
 import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -37,8 +38,27 @@ import java.util.List;
 public class SecurityConfig {
 
     private final CustomJwtAuthenticationConverter customJwtAuthenticationConverter;
-    private final RateLimiterRegistry rateLimiterRegistry;
+    private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
+
+    /**
+     * Ingress limit per user per window. Counted in Redis, so this is the limit for the whole
+     * deployment rather than per pod - see RateLimitingFilter.
+     */
+    @Value("${app.ratelimit.lineage-ingress.limit-for-period:10}")
+    private int rateLimitForPeriod;
+
+    @Value("${app.ratelimit.lineage-ingress.refresh-period:1m}")
+    private Duration rateLimitRefreshPeriod;
+
+    /**
+     * Whether X-Forwarded-For / X-Real-IP may be believed when recording a caller's origin.
+     * Defaults to false because those headers are client-supplied: trusting them on a directly
+     * exposed deployment lets a caller choose what the compliance trail records. Enable it only
+     * behind a proxy that overwrites them - which the nginx ingress in helm/ does.
+     */
+    @Value("${app.security.trust-forwarded-headers:false}")
+    private boolean trustForwardedHeaders;
 
     @Value("${app.security.jwt.secret}")
     private String jwtSecret;
@@ -56,16 +76,34 @@ public class SecurityConfig {
     private String audience;
 
     public SecurityConfig(CustomJwtAuthenticationConverter customJwtAuthenticationConverter,
-                           RateLimiterRegistry rateLimiterRegistry,
+                           StringRedisTemplate redisTemplate,
                            ObjectMapper objectMapper) {
         this.customJwtAuthenticationConverter = customJwtAuthenticationConverter;
-        this.rateLimiterRegistry = rateLimiterRegistry;
+        this.redisTemplate = redisTemplate;
         this.objectMapper = objectMapper;
     }
 
     @Bean
     public RateLimitingFilter rateLimitingFilter() {
-        return new RateLimitingFilter(rateLimiterRegistry, objectMapper);
+        return new RateLimitingFilter(redisTemplate, objectMapper, rateLimitForPeriod, rateLimitRefreshPeriod);
+    }
+
+    /**
+     * Not a {@code @Component}, and registered below rather than as a servlet filter, for the same
+     * reason as RateLimitingFilter: it must run once, inside the security chain, after
+     * authentication.
+     */
+    @Bean
+    public ClientOriginEnrichmentFilter clientOriginEnrichmentFilter() {
+        return new ClientOriginEnrichmentFilter(trustForwardedHeaders);
+    }
+
+    @Bean
+    public FilterRegistrationBean<ClientOriginEnrichmentFilter> clientOriginEnrichmentFilterRegistration(
+            ClientOriginEnrichmentFilter filter) {
+        FilterRegistrationBean<ClientOriginEnrichmentFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
     }
 
     /**
@@ -109,7 +147,11 @@ public class SecurityConfig {
                                 .jwtAuthenticationConverter(customJwtAuthenticationConverter)
                         )
                 )
-                .addFilterAfter(rateLimitingFilter, BearerTokenAuthenticationFilter.class);
+                // Order matters: the origin enrichment runs directly after authentication so the
+                // identity context carries the caller's IP before anything downstream reads it -
+                // including the rate limiter's client key and every audit row.
+                .addFilterAfter(clientOriginEnrichmentFilter(), BearerTokenAuthenticationFilter.class)
+                .addFilterAfter(rateLimitingFilter, ClientOriginEnrichmentFilter.class);
 
         return http.build();
     }

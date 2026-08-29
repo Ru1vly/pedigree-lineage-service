@@ -37,8 +37,6 @@ spring:
       enabled: false
 
 app:
-  pipeline:
-    phase-delay-ms: 50
   security:
     jwt:
       secret: test-only-hmac-secret-not-for-production-use-32-bytes-minimum

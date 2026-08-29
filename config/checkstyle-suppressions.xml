@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<!DOCTYPE suppressions PUBLIC
+        "-//Checkstyle//DTD SuppressionFilter Configuration 1.2//EN"
+        "https://checkstyle.org/dtds/suppressions_1_2.dtd">
+
+<!--
+  Narrow, justified exceptions to config/checkstyle.xml. Each entry states why. An entry with no
+  reason is a rule that should have been changed instead.
+-->
+<suppressions>
+    <!--
+      DockerAvailableCondition deliberately catches Throwable. It probes for a usable Docker
+      environment, and a broken or partially-installed Docker client surfaces as NoClassDefFoundError
+      or ExceptionInInitializerError - Errors, not Exceptions. Letting those escape would fail the
+      whole test class, which is the opposite of what this condition exists to do: skip cleanly.
+    -->
+    <suppress files="DockerAvailableCondition\.java" checks="IllegalCatch"/>
+</suppressions>

@@ -11,7 +11,11 @@ data:
   SPRING_REDIS_HOST: {{ .Values.redis.host | quote }}
   SPRING_REDIS_PORT: {{ .Values.redis.port | quote }}
   SPRING_SECURITY_OAUTH2_ISSUER_URI: {{ .Values.security.oauth2.issuerUri | quote }}
-  APP_PIPELINE_PHASE_DELAY_MS: {{ .Values.worker.env.phaseDelayMs | quote }}
+  # Requests reach the pod through the nginx ingress, so getRemoteAddr() is the ingress pod's
+  # address and the citizen's real IP is only in X-Forwarded-For. Without this, every audit row
+  # would record the ingress instead of the caller. Safe here precisely because the ingress
+  # overwrites the header; it must stay false on any directly exposed deployment.
+  APP_SECURITY_TRUST_FORWARDED_HEADERS: {{ .Values.security.trustForwardedHeaders | quote }}
   # Vault connection details (non-secret). The token itself comes from the Secret referenced
   # by security.vault.secretName / existingSecret - without these, the app previously fell
   # back to application.yml's localhost:8200 default, which doesn't exist inside a pod.

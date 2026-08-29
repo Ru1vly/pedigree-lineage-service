@@ -7,7 +7,7 @@ import com.edevlet.lineage.domain.model.ProcessingPhase;
 import com.edevlet.lineage.domain.model.TaskStatus;
 import com.edevlet.lineage.domain.repository.LineageAuditLogRepository;
 import com.edevlet.lineage.domain.repository.LineageQueryRepository;
-import com.edevlet.lineage.infrastructure.client.LegacyCensusGraphClient;
+import com.edevlet.lineage.infrastructure.cache.LineageTaskStateCache;
 import com.edevlet.lineage.infrastructure.messaging.LineageQueryMessage;
 import com.edevlet.lineage.infrastructure.pipeline.LineagePipelinePhaseRunner;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,8 +17,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.ValueOperations;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -46,13 +44,7 @@ class LineagePipelinePhaseRunnerTest {
     private LineageAuditLogRepository auditLogRepository;
 
     @Mock
-    private LegacyCensusGraphClient censusGraphClient;
-
-    @Mock
-    private StringRedisTemplate redisTemplate;
-
-    @Mock
-    private ValueOperations<String, String> valueOperations;
+    private LineageTaskStateCache stateCache;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -62,12 +54,11 @@ class LineagePipelinePhaseRunnerTest {
     void setUp() {
         objectMapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
         phaseRunner = new LineagePipelinePhaseRunner(
-                queryRepository, auditLogRepository, censusGraphClient, redisTemplate, objectMapper);
-        lenient().when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+                queryRepository, auditLogRepository, stateCache, objectMapper);
     }
 
     @Test
-    @DisplayName("runPhases - Completes 3-phase execution successfully and updates state")
+    @DisplayName("beginProcessing then completeWithAncestry - Completes execution and updates state")
     void runPhases_Success() {
         String txId = UUID.randomUUID().toString();
         LineageQueryMessage message = LineageQueryMessage.builder()
@@ -98,9 +89,30 @@ class LineagePipelinePhaseRunnerTest {
         AncestryTree mockTree = new AncestryTree(rootPerson, List.of(), 1, "SHA256-SEAL", "/doc");
 
         given(queryRepository.findByTransactionId(txId)).willReturn(Optional.of(task));
-        given(censusGraphClient.traverseAncestryGraph(eq("12345678950"), eq(2))).willReturn(mockTree);
 
-        phaseRunner.runPhases(message);
+        assertTrue(phaseRunner.beginProcessing(message));
+        assertEquals(TaskStatus.PROCESSING, task.getStatus());
+        assertEquals(ProcessingPhase.ANCESTRY_TRAVERSAL, task.getCurrentPhase());
+        assertEquals(10, task.getProgressPercentage());
+
+        // The census lookup happens in the orchestrator, between these transactions, so the tree
+        // arrives as an argument. Nothing in this bean performs I/O beyond the database.
+        //
+        // Each phase below is a separate transactional method for a reason: they used to run inside
+        // one transaction, so 35 and 70 were overwritten by 100 before anything committed and no
+        // poller could ever see them. Asserting the intermediate values between calls is what pins
+        // that down - if the phases are ever merged back, these assertions fail.
+        phaseRunner.verifyIdentityRecords(message);
+        assertEquals(ProcessingPhase.IDENTITY_VERIFICATION, task.getCurrentPhase());
+        assertEquals(35, task.getProgressPercentage());
+        assertEquals(TaskStatus.PROCESSING, task.getStatus());
+
+        phaseRunner.generateDocuments(message);
+        assertEquals(ProcessingPhase.DOCUMENT_GENERATION, task.getCurrentPhase());
+        assertEquals(70, task.getProgressPercentage());
+        assertEquals(TaskStatus.PROCESSING, task.getStatus());
+
+        phaseRunner.completeWithAncestry(message, mockTree);
 
         verify(queryRepository, atLeast(4)).save(task);
         assertEquals(TaskStatus.COMPLETED, task.getStatus());
@@ -108,10 +120,20 @@ class LineagePipelinePhaseRunnerTest {
         assertEquals(100, task.getProgressPercentage());
         assertNotNull(task.getResultPayload());
         assertNotNull(task.getResultDownloadUrl());
+
+        // The stored result must carry this task's own download URL, not the census client's
+        // hardcoded "/api/v1/lineage/documents/sample/download".
+        assertEquals("/api/v1/lineage/documents/" + txId + "/download", task.getResultDownloadUrl());
+        assertTrue(task.getResultPayload().contains("/api/v1/lineage/documents/" + txId + "/download"),
+                "the serialized ancestry tree should carry this task's download URL");
+
+        // Every committed phase transition is published to the state cache that status polling
+        // reads - the write end that used to exist with no reader.
+        verify(stateCache, atLeast(4)).writeAfterCommit(task);
     }
 
     @Test
-    @DisplayName("runPhases - A task already in a terminal status is not re-executed")
+    @DisplayName("beginProcessing - A task already in a terminal status is not re-executed")
     void runPhases_AlreadyTerminal_Skips() {
         String txId = UUID.randomUUID().toString();
         LineageQueryMessage message = LineageQueryMessage.builder()
@@ -129,21 +151,21 @@ class LineagePipelinePhaseRunnerTest {
 
         given(queryRepository.findByTransactionId(txId)).willReturn(Optional.of(task));
 
-        phaseRunner.runPhases(message);
-
-        verify(censusGraphClient, never()).traverseAncestryGraph(anyString(), anyInt());
+        // False tells the orchestrator to skip the census lookup entirely. This check, not the
+        // Redis lock, is what actually makes redelivery safe.
+        assertFalse(phaseRunner.beginProcessing(message));
         verify(queryRepository, never()).save(any(LineageQueryTask.class));
     }
 
     @Test
-    @DisplayName("runPhases - An unknown transactionId is logged and skipped, not NPE'd")
+    @DisplayName("beginProcessing - An unknown transactionId is logged and skipped, not NPE'd")
     void runPhases_TaskNotFound_Skips() {
         String txId = UUID.randomUUID().toString();
         LineageQueryMessage message = LineageQueryMessage.builder().transactionId(txId).build();
 
         given(queryRepository.findByTransactionId(txId)).willReturn(Optional.empty());
 
-        assertDoesNotThrow(() -> phaseRunner.runPhases(message));
-        verify(censusGraphClient, never()).traverseAncestryGraph(anyString(), anyInt());
+        assertFalse(phaseRunner.beginProcessing(message));
+        verify(queryRepository, never()).save(any(LineageQueryTask.class));
     }
 }

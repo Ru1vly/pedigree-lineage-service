@@ -8,6 +8,7 @@ import com.edevlet.lineage.domain.model.TaskStatus;
 import com.edevlet.lineage.domain.repository.LineageAuditLogRepository;
 import com.edevlet.lineage.domain.repository.LineageQueryRepository;
 import com.edevlet.lineage.domain.repository.TransactionalOutboxRepository;
+import com.edevlet.lineage.infrastructure.cache.LineageTaskStateCache;
 import com.edevlet.lineage.infrastructure.messaging.LineageQueryMessage;
 import com.edevlet.lineage.infrastructure.security.UserSecurityContextHolder;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -43,6 +44,7 @@ public class PipelineFailureHandler {
     private final LineageQueryRepository queryRepository;
     private final LineageAuditLogRepository auditLogRepository;
     private final TransactionalOutboxRepository outboxRepository;
+    private final LineageTaskStateCache stateCache;
     private final ObjectMapper objectMapper;
 
     /**
@@ -87,6 +89,10 @@ public class PipelineFailureHandler {
         task.setCurrentPhase(ProcessingPhase.INITIATED);
         task.setProgressPercentage(0);
         queryRepository.save(task);
+        // The cache still holds the progress this attempt reached before failing. Polling trusts
+        // it for non-terminal states, so a stale entry would keep reporting that progress while
+        // the task sits re-queued at 0. See LineageTaskStateCache.
+        stateCache.evict(transactionId);
 
         // Re-queue via a fresh outbox row rather than publishing to Kafka directly, so the
         // retry is committed atomically with the status rollback above and survives a crash
@@ -104,6 +110,7 @@ public class PipelineFailureHandler {
         log.error("Pipeline exhausted {} retries for transactionId={}; routing to DLQ.", task.getMaxRetries(), transactionId);
         task.setStatus(TaskStatus.FAILED);
         queryRepository.save(task);
+        stateCache.evict(transactionId);
         auditPipelineFailure(transactionId,
                 "Pipeline execution failed after " + task.getMaxRetries() + " retries: " + errorMessage);
     }

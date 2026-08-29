@@ -6,7 +6,6 @@ import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.core.context.SecurityContextHolder;
 
 import java.util.Optional;
-import java.util.Set;
 
 public final class UserSecurityContextHolder {
 

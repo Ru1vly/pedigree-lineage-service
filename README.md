@@ -62,12 +62,18 @@ the `production` profile.
 
 ## Running it
 
-Needs Java 21, Maven 3.9+, Docker.
+Needs Docker. Java 21 and Maven 3.9+ are needed only to run the test suite on the host — the
+image builds Maven-side inside `maven:3.9.9-eclipse-temurin-21`, so `docker compose up --build`
+works on a machine with neither installed.
 
 ```bash
-mvn clean test
+mvn clean verify        # tests, Checkstyle and the coverage gate; needs local JDK 21 + Maven
 docker compose up --build
 ```
+
+`verify` also runs the Testcontainers tests (Flyway migrations against real Postgres, and the
+outbox → Debezium → Kafka path), which need a working Docker daemon. Without one they skip
+rather than fail.
 
 Compose brings up Postgres (`wal_level=logical`), Kafka, Kafka Connect with the Debezium outbox
 connector registered automatically, Redis, Zipkin, and the app on `:8080`.
@@ -162,13 +168,36 @@ curl http://localhost:8080/api/v1/lineage/queries/b27b705c-4d1f-41a5-b1db-95504d
         ]
       }
     ],
-    "totalAncestorsFound": 3,
-    "verificationSealHash": "SHA256-A9C8E7F12D34B567890EF1234567890ABCDEF",
+    "totalAncestorsFound": 5,
+    "verificationSealHash": "SHA256-CONFIRMED-SEAL-9021A",
     "documentDownloadUrl": "/api/v1/lineage/documents/e4d3c2b1/download"
   },
   "resultDownloadUrl": "/api/v1/lineage/documents/e4d3c2b1/download"
 }
 ```
+
+## What is simulated
+
+**The domain is a stub. The infrastructure around it is not.** This is a deliberate split — the
+exercise is the async pipeline, not genealogy — but you should not have to read the source to
+discover it:
+
+- `LegacyCensusGraphClientImpl` returns **one hardcoded family** (AHMET YILMAZ and forebears)
+  regardless of which national ID you send. Only the generation count varies, with `generationsDepth`.
+  `totalAncestorsFound` is the fixed literal `5`. A real implementation would call the census/family
+  registry graph backend here; nothing else in the pipeline would change.
+- `verificationSealHash` is **a string constant, not a hash of anything.** Nothing is computed and
+  nothing can verify it. A real seal would be an HMAC over a canonical serialization of the tree,
+  keyed from the same secret machinery that backs TCKN encryption.
+- The downloadable "certificate" is plain text assembled by `LineageDocumentController`, carrying a
+  footer that cites Law No. 5070 on secure electronic signatures. **It is not signed** and it is not
+  a legal document.
+
+What is real: the outbox and CDC path, the transaction boundaries, retry and dead-lettering,
+per-caller rate limiting, TCKN encryption at rest, the authorization rules, and the failure
+semantics — including the fact that an unreachable census backend now fails the task loudly instead
+of completing it with placeholder ancestry. See
+[`docs/WHAT_WAS_BROKEN.md`](docs/WHAT_WAS_BROKEN.md#8) for why that last one is spelled out.
 
 If a task sits at `SUBMITTED` and never moves, the CDC path is down, not the application.
 Nothing here publishes to Kafka — the only write is an outbox row. Check
@@ -178,7 +207,7 @@ Nothing here publishes to Kafka — the only write is an outbox row. Check
 
 | Method | Path | Access |
 |---|---|---|
-| `POST` | `/api/v1/lineage/queries` | authenticated, rate limited 10/min per caller |
+| `POST` | `/api/v1/lineage/queries` | authenticated, rate limited 10/min per caller (counted in Redis, deployment-wide) |
 | `GET` | `/api/v1/lineage/queries/{txId}` | owner or admin |
 | `DELETE` | `/api/v1/lineage/queries/{txId}` | owner or admin |
 | `GET` | `/api/v1/lineage/queries/{txId}/stream` | owner or admin, SSE progress |
@@ -207,11 +236,17 @@ can't be made atomic; this arrangement means there's only ever one write, and de
 CDC pipeline's problem. A broker outage delays events. It cannot lose them.
 
 **Three-phase worker pipeline.** Ancestry graph traversal, identity and certificate
-verification, certified document generation with a verification seal. A Redis lock
-(`lock:lineage:processing:{txId}`, fenced with a per-attempt token) keeps two pods off one task.
-Retries go back around through the outbox and are counted on the task row; exhausted retries
-record the real cause and a compliance audit entry, then rethrow to
-`lineage.query.events.dlt`.
+verification, certified document generation with a verification seal. The census lookup runs
+between two short transactions rather than inside one, so no database connection or row lock is
+held across the network call. Retries go back around through the outbox and are counted on the task
+row; exhausted retries record the real cause and a compliance audit entry, then rethrow to
+`lineage.query.events.dlt`. **An unreachable census backend fails the task** — it does not complete
+it with placeholder ancestry, which is what it used to do.
+
+A Redis lock (`lock:lineage:processing:{txId}`, fenced with a per-attempt token) keeps two pods off
+one task, but it is an optimisation, not the correctness mechanism: the guard that makes redelivery
+safe is the terminal-status check at the top of the pipeline. Contention leaves the Kafka offset
+uncommitted so the record is redelivered on a bounded backoff, rather than being acked and dropped.
 
 **TCKN encryption at rest.** A JPA attribute converter encrypts on the way to the database via
 Vault Transit, falling back to local AES-256-GCM envelope encryption. Decryption fails loudly
@@ -248,7 +283,7 @@ com.edevlet.lineage
 ├── dto/             REST request/response shapes
 ├── service/         LineageQueryService - synchronous ingress use cases
 ├── infrastructure/  everything that talks outside the JVM
-│   ├── client/        legacy census/graph backend (circuit breaker + fallback)
+│   ├── client/        legacy census/graph backend (circuit breaker, no fallback)
 │   ├── messaging/     Kafka config, consumer, message shape
 │   ├── pipeline/      orchestrator, phase runner, failure handler
 │   ├── ratelimit/     per-caller rate limiting filter

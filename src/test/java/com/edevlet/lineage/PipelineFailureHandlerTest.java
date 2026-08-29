@@ -7,6 +7,7 @@ import com.edevlet.lineage.domain.model.TaskStatus;
 import com.edevlet.lineage.domain.repository.LineageAuditLogRepository;
 import com.edevlet.lineage.domain.repository.LineageQueryRepository;
 import com.edevlet.lineage.domain.repository.TransactionalOutboxRepository;
+import com.edevlet.lineage.infrastructure.cache.LineageTaskStateCache;
 import com.edevlet.lineage.infrastructure.messaging.LineageQueryMessage;
 import com.edevlet.lineage.infrastructure.pipeline.PipelineFailureHandler;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -41,6 +42,9 @@ class PipelineFailureHandlerTest {
     @Mock
     private TransactionalOutboxRepository outboxRepository;
 
+    @Mock
+    private LineageTaskStateCache stateCache;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private PipelineFailureHandler failureHandler;
@@ -49,7 +53,7 @@ class PipelineFailureHandlerTest {
     void setUp() {
         objectMapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
         failureHandler = new PipelineFailureHandler(
-                queryRepository, auditLogRepository, outboxRepository, objectMapper);
+                queryRepository, auditLogRepository, outboxRepository, stateCache, objectMapper);
     }
 
     @Test

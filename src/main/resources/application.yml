@@ -74,15 +74,26 @@ spring:
         backend: database
 
 app:
+  ratelimit:
+    # Per-user ingress limit on POST /api/v1/lineage/queries. Counted in Redis by
+    # RateLimitingFilter, so this is the limit for the whole deployment - it does not multiply by
+    # the replica count the way the previous in-JVM Resilience4j registry did.
+    lineage-ingress:
+      limit-for-period: ${APP_RATELIMIT_LIMIT_FOR_PERIOD:10}
+      refresh-period: ${APP_RATELIMIT_REFRESH_PERIOD:1m}
   kafka:
     listener:
       # Disabled only under the "test" profile (pure H2/mocked-Redis unit tests) so the listener
       # container doesn't spin up a background consumer thread retrying against a Kafka broker
       # that was never started - see application-test.yml.
       auto-startup: ${APP_KAFKA_LISTENER_AUTO_STARTUP:true}
-  pipeline:
-    phase-delay-ms: 1500
   security:
+    # Believe X-Forwarded-For / X-Real-IP when recording a caller's origin in the audit trail.
+    # Off by default: those headers are client-supplied, so trusting them on a directly exposed
+    # deployment lets a caller choose what the compliance trail records about them. Behind the
+    # nginx ingress in helm/, getRemoteAddr() is the ingress pod and the real client is only in
+    # the header, so that deployment sets this true. See ClientOriginEnrichmentFilter.
+    trust-forwarded-headers: ${APP_SECURITY_TRUST_FORWARDED_HEADERS:false}
     # Every default below is deliberately obvious/insecure so a fresh clone still boots for
     # local development. SecretsConfigurationGuard refuses to start under the "production"
     # Spring profile if any of these are left unchanged — see values-prod.yaml for the
@@ -130,18 +141,6 @@ management:
       endpoint: ${MANAGEMENT_ZIPKIN_TRACING_ENDPOINT:http://localhost:9411/api/v2/spans}
 
 resilience4j:
-  ratelimiter:
-    # A named config template, not a single pre-built instance: RateLimitingFilter creates one
-    # RateLimiter PER CLIENT KEY via registry.rateLimiter(clientKey, "lineageIngress"), and every
-    # one of those instances is configured from this shared template. Declaring this under
-    # "instances" instead of "configs" builds a single eagerly-created limiter named
-    # "lineageIngress" itself and does NOT register a config retrievable by that name, which is
-    # what registry.rateLimiter(key, "lineageIngress") needs - see SecurityFilterChainTest.
-    configs:
-      lineageIngress:
-        limitForPeriod: 10
-        limitRefreshPeriod: 1m
-        timeoutDuration: 100ms
   circuitbreaker:
     instances:
       legacyCensusBackend:
